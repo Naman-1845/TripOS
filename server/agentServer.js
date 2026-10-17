@@ -256,9 +256,9 @@ export async function runDeterministicAgentLoop({ activeTrip, requestedChanges =
  * Genuine LLM Agent Runner using Google GenAI SDK (@google/genai)
  * Executes true function calling: the LLM calls registered tools and inspects real outputs.
  */
-export async function runLlmAgentLoop({ activeTrip, requestedChanges = {}, simulatedDisruption = null, apiKey, modelName }) {
+export async function runLlmAgentLoop({ activeTrip, requestedChanges = {}, simulatedDisruption = null, apiKey, modelName, aiClient = null }) {
   const modelToUse = modelName || process.env.GEMINI_MODEL || DEFAULT_GEMINI_MODEL;
-  const ai = new GoogleGenAI({ apiKey });
+  const ai = aiClient || new GoogleGenAI({ apiKey });
 
   const trace = [];
   let step = 1;
@@ -321,6 +321,12 @@ Please inspect the trip, search options, verify costs with calculate_trip_budget
       break;
     }
 
+    // Preserve the complete original candidate.content as one model turn
+    const modelContent = candidate.content || { role: 'model', parts };
+    contents.push(modelContent);
+
+    const functionResponseParts = [];
+
     // Execute each requested tool call
     for (const call of functionCalls) {
       if (!AGENT_TOOL_NAMES.includes(call.name)) {
@@ -349,22 +355,20 @@ Please inspect the trip, search options, verify costs with calculate_trip_budget
         finalProposal = toolOutput;
       }
 
-      // Append model call and tool response to conversation history
-      contents.push({
-        role: 'model',
-        parts: [{ functionCall: call }]
-      });
-
-      contents.push({
-        role: 'user',
-        parts: [{
-          functionResponse: {
-            name: call.name,
-            response: { output: toolOutput }
-          }
-        }]
+      functionResponseParts.push({
+        functionResponse: {
+          name: call.name,
+          response: { output: toolOutput },
+          ...(call.id ? { id: call.id } : {})
+        }
       });
     }
+
+    // Collect all functionResponse parts into ONE user turn
+    contents.push({
+      role: 'user',
+      parts: functionResponseParts
+    });
 
     // If proposal was drafted, we can conclude
     if (finalProposal) {

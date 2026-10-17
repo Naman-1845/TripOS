@@ -243,5 +243,130 @@ describe('TripOS Agent Server & Execution Loop', () => {
       expect(breakdown.totalEstimatedExpenses).toBe(sum);
     });
   });
+
+  // 6. Gemini Function-Calling Multi-Call Turn Assembly
+  describe('Gemini Function-Calling Multi-Call Assembly', () => {
+    it('preserves single model turn and groups multiple function responses into a single user turn', async () => {
+      const capturedRequests = [];
+
+      const mockCandidateTurn1 = {
+        content: {
+          role: 'model',
+          parts: [
+            { text: 'Inspecting active trip and searching options concurrently.' },
+            {
+              functionCall: {
+                name: 'inspect_active_trip',
+                args: {},
+                id: 'call_inspect_001'
+              }
+            },
+            {
+              functionCall: {
+                name: 'search_travel_options',
+                args: { destination: 'Manali', category: 'transport' },
+                id: 'call_search_002'
+              }
+            }
+          ]
+        }
+      };
+
+      const mockCandidateTurn2 = {
+        content: {
+          role: 'model',
+          parts: [
+            { text: 'Drafting recovery proposal based on verified search options.' },
+            {
+              functionCall: {
+                name: 'draft_recovery_proposal',
+                args: {
+                  newDuration: 5,
+                  newBudget: 20000,
+                  selectedTransportId: manaliData.transportOptions[0].id,
+                  selectedAccommodationId: manaliData.accommodations[0].id,
+                  actionsTaken: ['Preserved itinerary with verified transport'],
+                  agentExplanation: 'Verified multi-call recovery test proposal.'
+                },
+                id: 'call_draft_003'
+              }
+            }
+          ]
+        }
+      };
+
+      const mockAiClient = {
+        models: {
+          generateContent: async ({ contents }) => {
+            // Snapshot conversation history at each turn
+            capturedRequests.push(JSON.parse(JSON.stringify(contents)));
+            if (capturedRequests.length === 1) {
+              return {
+                candidates: [mockCandidateTurn1],
+                functionCalls: [
+                  mockCandidateTurn1.content.parts[1].functionCall,
+                  mockCandidateTurn1.content.parts[2].functionCall
+                ]
+              };
+            }
+            return {
+              candidates: [mockCandidateTurn2],
+              functionCalls: [
+                mockCandidateTurn2.content.parts[1].functionCall
+              ]
+            };
+          }
+        }
+      };
+
+      const result = await runLlmAgentLoop({
+        activeTrip: baseTrip,
+        requestedChanges: {},
+        apiKey: 'test-fake-key',
+        aiClient: mockAiClient
+      });
+
+      expect(result.success).toBe(true);
+      expect(result.mode).toBe('live-llm-agent');
+
+      // capturedRequests[0] is the initial user prompt (length 1)
+      expect(capturedRequests[0].length).toBe(1);
+      expect(capturedRequests[0][0].role).toBe('user');
+
+      // capturedRequests[1] is the conversation history passed into Turn 2.
+      // Must contain exactly:
+      // Turn 0: initial user prompt
+      // Turn 1: single model turn with the original candidate parts (thoughts + 2 function calls)
+      // Turn 2: single user turn containing BOTH function responses
+      expect(capturedRequests[1].length).toBe(3);
+
+      const modelTurn = capturedRequests[1][1];
+      expect(modelTurn.role).toBe('model');
+      expect(modelTurn.parts.length).toBe(3);
+      expect(modelTurn.parts[0].text).toBe('Inspecting active trip and searching options concurrently.');
+      expect(modelTurn.parts[1].functionCall.name).toBe('inspect_active_trip');
+      expect(modelTurn.parts[1].functionCall.id).toBe('call_inspect_001');
+      expect(modelTurn.parts[2].functionCall.name).toBe('search_travel_options');
+      expect(modelTurn.parts[2].functionCall.id).toBe('call_search_002');
+
+      const userResponseTurn = capturedRequests[1][2];
+      expect(userResponseTurn.role).toBe('user');
+      expect(userResponseTurn.parts.length).toBe(2);
+
+      // Verify response 1
+      const response1 = userResponseTurn.parts[0].functionResponse;
+      expect(response1.name).toBe('inspect_active_trip');
+      expect(response1.id).toBe('call_inspect_001');
+      expect(response1.response.output.destination).toBe('Manali');
+      expect(response1.response.output.duration).toBe(5);
+
+      // Verify response 2
+      const response2 = userResponseTurn.parts[1].functionResponse;
+      expect(response2.name).toBe('search_travel_options');
+      expect(response2.id).toBe('call_search_002');
+      expect(response2.response.output.destination).toBe('Manali');
+      expect(response2.response.output.transportOptions).toBeDefined();
+    });
+  });
 });
 
