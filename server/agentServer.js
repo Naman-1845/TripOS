@@ -59,9 +59,14 @@ export async function runDeterministicAgentLoop({ activeTrip, requestedChanges =
     observation: inspectResult
   });
 
-  // Calculate target duration and budget
+  // Calculate target duration, budget, destination, origin, travellers
   let targetDuration = activeTrip.inputs.duration;
   let targetBudget = activeTrip.inputs.budget;
+  let targetDestination = (requestedChanges.destination && String(requestedChanges.destination).trim()) || activeTrip.inputs.destination;
+  let targetOrigin = (requestedChanges.origin && String(requestedChanges.origin).trim()) || activeTrip.inputs.origin;
+  let targetTravellers = (requestedChanges.travellers !== undefined && parseInt(requestedChanges.travellers, 10) >= 1)
+    ? parseInt(requestedChanges.travellers, 10)
+    : activeTrip.inputs.travellers;
   let userReason = requestedChanges.userReason || null;
 
   if (requestedChanges.durationDelta !== undefined || requestedChanges.budgetDelta !== undefined) {
@@ -95,10 +100,10 @@ export async function runDeterministicAgentLoop({ activeTrip, requestedChanges =
 
   // Step 2: Search travel options
   const searchThought = isDisrupted
-    ? 'Adverse conditions active: querying sheltered/indoor attractions and lodging alternatives.'
-    : 'Querying destination catalog for suitable transport and accommodation alternatives.';
+    ? `Adverse conditions active: querying sheltered/indoor attractions and lodging alternatives for ${targetDestination}.`
+    : `Querying destination catalog for suitable transport and accommodation alternatives in ${targetDestination}.`;
   const searchResult = search_travel_options({
-    destination: activeTrip.inputs.destination,
+    destination: targetDestination,
     category: 'all',
     indoorOnly: isDisrupted
   });
@@ -107,7 +112,7 @@ export async function runDeterministicAgentLoop({ activeTrip, requestedChanges =
     thought: searchThought,
     toolCall: {
       name: 'search_travel_options',
-      args: { destination: activeTrip.inputs.destination, category: 'all', indoorOnly: isDisrupted }
+      args: { destination: targetDestination, category: 'all', indoorOnly: isDisrupted }
     },
     observation: {
       destination: searchResult.destination,
@@ -118,16 +123,29 @@ export async function runDeterministicAgentLoop({ activeTrip, requestedChanges =
   });
 
   // Step 3: Candidate selection & budget calculation
-  let chosenTransport = activeTrip.selectedTransport || searchResult.transportOptions?.[0];
-  let chosenAccommodation = activeTrip.selectedAccommodation || searchResult.accommodations?.[0];
+  let chosenTransport = null;
+  if (requestedChanges.transportPreference && searchResult.transportOptions?.length) {
+    chosenTransport = searchResult.transportOptions.find(t => t.type.toLowerCase() === requestedChanges.transportPreference.toLowerCase());
+  }
+  if (!chosenTransport) {
+    chosenTransport = (targetDestination === activeTrip.inputs.destination ? activeTrip.selectedTransport : null) || searchResult.transportOptions?.[0];
+  }
+
+  let chosenAccommodation = null;
+  if (requestedChanges.accommodationPreference && searchResult.accommodations?.length) {
+    chosenAccommodation = searchResult.accommodations.find(a => a.type.toLowerCase() === requestedChanges.accommodationPreference.toLowerCase());
+  }
+  if (!chosenAccommodation) {
+    chosenAccommodation = (targetDestination === activeTrip.inputs.destination ? activeTrip.selectedAccommodation : null) || searchResult.accommodations?.[0];
+  }
   const actionsTaken = [];
 
   // Initial calculation
   let budgetResult = calculate_trip_budget({
-    destination: activeTrip.inputs.destination,
+    destination: targetDestination,
     budget: targetBudget,
     duration: targetDuration,
-    travellers: activeTrip.inputs.travellers,
+    travellers: targetTravellers,
     selectedTransportId: chosenTransport.id,
     selectedAccommodationId: chosenAccommodation.id
   });
@@ -138,10 +156,10 @@ export async function runDeterministicAgentLoop({ activeTrip, requestedChanges =
     toolCall: {
       name: 'calculate_trip_budget',
       args: {
-        destination: activeTrip.inputs.destination,
+        destination: targetDestination,
         budget: targetBudget,
         duration: targetDuration,
-        travellers: activeTrip.inputs.travellers,
+        travellers: targetTravellers,
         selectedTransportId: chosenTransport.id,
         selectedAccommodationId: chosenAccommodation.id
       }
@@ -161,10 +179,10 @@ export async function runDeterministicAgentLoop({ activeTrip, requestedChanges =
       actionsTaken.push(`Adjusted lodging tier to ${hostelOrBudget.name} to optimize budget.`);
 
       budgetResult = calculate_trip_budget({
-        destination: activeTrip.inputs.destination,
+        destination: targetDestination,
         budget: targetBudget,
         duration: targetDuration,
-        travellers: activeTrip.inputs.travellers,
+        travellers: targetTravellers,
         selectedTransportId: chosenTransport.id,
         selectedAccommodationId: chosenAccommodation.id
       });
@@ -175,10 +193,10 @@ export async function runDeterministicAgentLoop({ activeTrip, requestedChanges =
         toolCall: {
           name: 'calculate_trip_budget',
           args: {
-            destination: activeTrip.inputs.destination,
+            destination: targetDestination,
             budget: targetBudget,
             duration: targetDuration,
-            travellers: activeTrip.inputs.travellers,
+            travellers: targetTravellers,
             selectedTransportId: chosenTransport.id,
             selectedAccommodationId: chosenAccommodation.id
           }
@@ -193,11 +211,17 @@ export async function runDeterministicAgentLoop({ activeTrip, requestedChanges =
   }
 
   // Document actions taken
+  if (targetDestination !== activeTrip.inputs.destination) {
+    actionsTaken.push(`Changed destination from ${activeTrip.inputs.destination} to ${targetDestination}.`);
+  }
   if (targetDuration !== activeTrip.inputs.duration) {
     actionsTaken.push(`Adjusted duration from ${activeTrip.inputs.duration} to ${targetDuration} days.`);
   }
   if (targetBudget !== activeTrip.inputs.budget) {
     actionsTaken.push(`Recalculated expenses for updated budget of ₹${targetBudget.toLocaleString('en-IN')}.`);
+  }
+  if (budgetResult.isOverBudget) {
+    actionsTaken.push(`Note: Total verified expenses of ₹${budgetResult.totalEstimatedExpenses.toLocaleString('en-IN')} exceed the reduced budget of ₹${targetBudget.toLocaleString('en-IN')} by ₹${budgetResult.deficit.toLocaleString('en-IN')}. Consider shortening trip duration.`);
   }
   if (isDisrupted) {
     actionsTaken.push(`Replaced outdoor activities with verified indoor alternatives due to: "${finalDisruption.reason}".`);
@@ -207,12 +231,17 @@ export async function runDeterministicAgentLoop({ activeTrip, requestedChanges =
   }
 
   // Step 4: Draft recovery proposal
-  const explanation = `Autonomous recovery evaluated candidate adjustments for ${activeTrip.inputs.destination}. Total verified cost is ₹${budgetResult.totalEstimatedExpenses.toLocaleString('en-IN')} against ₹${targetBudget.toLocaleString('en-IN')} budget.`;
+  const explanation = budgetResult.isOverBudget
+    ? `Autonomous recovery evaluated candidate adjustments for ${targetDestination}. Total verified cost is ₹${budgetResult.totalEstimatedExpenses.toLocaleString('en-IN')}, exceeding the target ₹${targetBudget.toLocaleString('en-IN')} budget by ₹${budgetResult.deficit.toLocaleString('en-IN')}. Consider reducing duration to fit the budget.`
+    : `Autonomous recovery evaluated candidate adjustments for ${targetDestination}. Total verified cost is ₹${budgetResult.totalEstimatedExpenses.toLocaleString('en-IN')} against ₹${targetBudget.toLocaleString('en-IN')} budget.`;
 
   const proposal = draft_recovery_proposal({
     activeTrip,
     newDuration: targetDuration,
     newBudget: targetBudget,
+    newDestination: targetDestination,
+    newOrigin: targetOrigin,
+    newTravellers: targetTravellers,
     selectedTransportId: chosenTransport.id,
     selectedAccommodationId: chosenAccommodation.id,
     actionsTaken,
@@ -402,6 +431,75 @@ Please inspect the trip, search options, verify costs with calculate_trip_budget
 }
 
 // -------------------------------------------------------------------------
+// Quota & Error Management
+// -------------------------------------------------------------------------
+
+let quotaExceededUntil = 0;
+const DEFAULT_QUOTA_COOLDOWN_MS = 60 * 1000; // 60-second cooldown
+
+/**
+ * Detects whether an error from Gemini API is a quota-exceeded / rate-limit error (HTTP 429 RESOURCE_EXHAUSTED).
+ * Inspects status codes, error codes, and standard Gemini error message patterns.
+ */
+export function isGeminiQuotaExceededError(err) {
+  if (!err) return false;
+
+  // 1. Direct status or code property (429 or 'RESOURCE_EXHAUSTED')
+  if (err.status === 429 || err.statusCode === 429 || err.code === 429) {
+    return true;
+  }
+  const statusStr = String(err.status || err.code || '').toUpperCase();
+  if (statusStr === 'RESOURCE_EXHAUSTED' || statusStr.includes('RESOURCE_EXHAUSTED')) {
+    return true;
+  }
+
+  // 2. Nested error objects (e.g. GoogleGenAI / gRPC / Axios responses)
+  if (err.error && typeof err.error === 'object') {
+    if (err.error.code === 429 || err.error.status === 429) return true;
+    const nestedStatus = String(err.error.status || '').toUpperCase();
+    if (nestedStatus.includes('RESOURCE_EXHAUSTED')) return true;
+    const nestedMsg = String(err.error.message || '').toUpperCase();
+    if (
+      nestedMsg.includes('429') ||
+      nestedMsg.includes('RESOURCE_EXHAUSTED') ||
+      nestedMsg.includes('QUOTA') ||
+      nestedMsg.includes('RATE LIMIT')
+    ) {
+      return true;
+    }
+  }
+
+  // 3. Error message strings
+  const msg = String(err.message || '').toUpperCase();
+  if (
+    msg.includes('429') ||
+    msg.includes('RESOURCE_EXHAUSTED') ||
+    msg.includes('QUOTA') ||
+    msg.includes('RATE LIMIT')
+  ) {
+    return true;
+  }
+
+  return false;
+}
+
+export function setQuotaCooldown(ms = DEFAULT_QUOTA_COOLDOWN_MS) {
+  quotaExceededUntil = Date.now() + ms;
+}
+
+export function resetQuotaCooldown() {
+  quotaExceededUntil = 0;
+}
+
+export function getQuotaCooldownStatus() {
+  const isCooldown = Date.now() < quotaExceededUntil;
+  return {
+    isQuotaExceeded: isCooldown,
+    cooldownRemainingMs: isCooldown ? Math.max(0, quotaExceededUntil - Date.now()) : 0
+  };
+}
+
+// -------------------------------------------------------------------------
 // HTTP Endpoints
 // -------------------------------------------------------------------------
 
@@ -411,13 +509,17 @@ Please inspect the trip, search options, verify costs with calculate_trip_budget
  */
 app.get('/api/agent/status', (req, res) => {
   const hasKey = Boolean(process.env.GEMINI_API_KEY && process.env.GEMINI_API_KEY.trim());
+  const quotaStatus = getQuotaCooldownStatus();
 
   res.json({
     status: 'online',
     timestamp: new Date().toISOString(),
     configured: hasKey,
-    mode: hasKey ? 'live-llm-agent' : 'deterministic-fallback',
-    provider: hasKey ? 'Google Gemini (@google/genai)' : 'TripOS Rule-Based Tool Runner',
+    quotaExceeded: quotaStatus.isQuotaExceeded,
+    mode: (hasKey && !quotaStatus.isQuotaExceeded) ? 'live-llm-agent' : 'deterministic-fallback',
+    provider: (hasKey && !quotaStatus.isQuotaExceeded)
+      ? 'Google Gemini (@google/genai)'
+      : (quotaStatus.isQuotaExceeded ? 'TripOS Rule-Based Tool Runner (Quota Cooldown)' : 'TripOS Rule-Based Tool Runner'),
     model: hasKey ? (process.env.GEMINI_MODEL || DEFAULT_GEMINI_MODEL) : null,
     registeredTools: AGENT_TOOL_NAMES,
     safetyLimits: {
@@ -431,6 +533,7 @@ app.get('/api/agent/status', (req, res) => {
 /**
  * POST /api/agent/recover
  * Receives trip recovery request, runs genuine tool loop or deterministic fallback.
+ * Gracefully intercepts Gemini HTTP 429 quota errors and immediately uses the deterministic runner.
  */
 app.post('/api/agent/recover', async (req, res) => {
   try {
@@ -444,9 +547,30 @@ app.post('/api/agent/recover', async (req, res) => {
     }
 
     const forceFallback = Boolean(req.body && req.body.forceFallback);
-    const apiKey = !forceFallback && process.env.GEMINI_API_KEY ? process.env.GEMINI_API_KEY.trim() : null;
+    const customAiClient = req.app?.locals?.aiClient || null;
+    const apiKey = !forceFallback && (customAiClient || (process.env.GEMINI_API_KEY && process.env.GEMINI_API_KEY.trim()))
+      ? (process.env.GEMINI_API_KEY ? process.env.GEMINI_API_KEY.trim() : 'mock-key')
+      : null;
 
-    // Mode A: Live LLM Agent with Tool Calling (when API key is provided)
+    const isQuotaInCooldown = Date.now() < quotaExceededUntil;
+
+    // If quota cooldown is active, immediately bypass live LLM without retrying
+    if (apiKey && isQuotaInCooldown) {
+      const fallbackResult = await runDeterministicAgentLoop({
+        activeTrip,
+        requestedChanges,
+        simulatedDisruption
+      });
+
+      return res.json({
+        ...fallbackResult,
+        mode: 'deterministic-fallback-on-error',
+        notice: 'Gemini API quota currently in cooldown (HTTP 429); executed deterministic tool runner directly without retrying.',
+        agentSummary: 'Gemini free-tier quota exceeded; recovery plan safely formulated using verified deterministic rules.'
+      });
+    }
+
+    // Mode A: Live LLM Agent with Tool Calling (when API key is configured and not in quota cooldown)
     if (apiKey) {
       try {
         const agentResult = await runLlmAgentLoop({
@@ -454,12 +578,22 @@ app.post('/api/agent/recover', async (req, res) => {
           requestedChanges,
           simulatedDisruption,
           apiKey,
-          modelName: process.env.GEMINI_MODEL
+          modelName: process.env.GEMINI_MODEL,
+          aiClient: customAiClient
         });
         return res.json(agentResult);
       } catch (err) {
-        // Safe logging: never print or expose the API key
-        console.warn('[TripOS Agent Server] Live LLM execution failed, falling back to deterministic runner:', err.message);
+        const isQuota = isGeminiQuotaExceededError(err);
+
+        if (isQuota) {
+          // Enter quota cooldown to prevent subsequent requests from repeatedly hitting 429
+          setQuotaCooldown();
+          console.warn('[TripOS Agent Server] Gemini API quota exceeded (HTTP 429 RESOURCE_EXHAUSTED). Entering cooldown, immediately using deterministic runner.');
+        } else {
+          // Safe logging for other failures: never print or expose API keys
+          const safeMessage = (err.message || 'Unknown error').replace(/key=[^&\s]+/gi, 'key=REDACTED');
+          console.warn('[TripOS Agent Server] Live LLM execution failed, falling back to deterministic runner:', safeMessage);
+        }
 
         const fallbackResult = await runDeterministicAgentLoop({
           activeTrip,
@@ -470,7 +604,12 @@ app.post('/api/agent/recover', async (req, res) => {
         return res.json({
           ...fallbackResult,
           mode: 'deterministic-fallback-on-error',
-          notice: 'Live LLM provider encountered an error; safely executed deterministic tool runner.'
+          notice: isQuota
+            ? 'Gemini API quota exceeded (HTTP 429); safely executed deterministic tool runner.'
+            : 'Live LLM provider encountered an error; safely executed deterministic tool runner.',
+          agentSummary: isQuota
+            ? 'Gemini free-tier quota exceeded; recovery plan safely formulated using verified deterministic rules.'
+            : fallbackResult.agentSummary
         });
       }
     }
@@ -484,10 +623,12 @@ app.post('/api/agent/recover', async (req, res) => {
 
     return res.json(fallbackResult);
   } catch (err) {
-    console.error('[TripOS Agent Server] Recovery request error:', err.message);
+    // Safe error logging: ensure no keys leaked
+    const safeError = (err.message || 'Internal agent recovery error').replace(/key=[^&\s]+/gi, 'key=REDACTED');
+    console.error('[TripOS Agent Server] Recovery request error:', safeError);
     return res.status(500).json({
       success: false,
-      error: err.message || 'Internal agent recovery error'
+      error: safeError
     });
   }
 });

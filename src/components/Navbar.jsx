@@ -8,9 +8,34 @@ export default function Navbar({
   onOpenHistory,
   onResetTrip,
   savedTripsCount = 0,
-  historyCount = 0
+  historyCount = 0,
+  agentStatus = null
 }) {
   const aiMeta = AIService.getEngineMetadata();
+
+  // Determine honest display status
+  let pillStyle = 'bg-amber-50 border-amber-200 text-amber-800';
+  let pillText = 'Offline (Local Heuristic Engine)';
+  let pillTitle = 'Agent backend offline. Running client-side deterministic recovery.';
+  let isLive = false;
+
+  if (agentStatus?.isOnline) {
+    if (agentStatus.mode === 'live-llm-agent') {
+      pillStyle = 'bg-emerald-50 border-emerald-200 text-emerald-800';
+      pillText = `Live Gemini Agent (${agentStatus.model || 'gemini-3.8-flash'})`;
+      pillTitle = 'Google Gemini live function calling enabled. Secrets secured server-side.';
+      isLive = true;
+    } else {
+      pillStyle = 'bg-blue-50 border-blue-200 text-blue-800';
+      pillText = 'Server Tool Runner (Deterministic)';
+      pillTitle = 'Backend connected. Running deterministic tool runner (no API key configured).';
+    }
+  } else if (!agentStatus) {
+    isLive = aiMeta.isLiveAI;
+    pillStyle = isLive ? 'bg-emerald-50 border-emerald-200 text-emerald-800' : 'bg-amber-50 border-amber-200 text-amber-800';
+    pillText = aiMeta.mode;
+    pillTitle = aiMeta.safetyNotice;
+  }
 
   return (
     <header className="bg-white border-b border-slate-200 sticky top-0 z-30 shadow-xs">
@@ -32,22 +57,18 @@ export default function Navbar({
             </div>
           </div>
 
-          {/* AI Metadata Pill */}
+          {/* AI / Agent Status Metadata Pill */}
           <div className="hidden md:flex items-center">
             <div
-              className={`flex items-center gap-2 px-3 py-1 rounded-full text-xs font-medium border ${
-                aiMeta.isLiveAI
-                  ? 'bg-emerald-50 border-emerald-200 text-emerald-800'
-                  : 'bg-amber-50 border-amber-200 text-amber-800'
-              }`}
-              title={aiMeta.safetyNotice}
+              className={`flex items-center gap-2 px-3 py-1 rounded-full text-xs font-medium border ${pillStyle}`}
+              title={pillTitle}
             >
-              {aiMeta.isLiveAI ? (
+              {isLive ? (
                 <ShieldCheck className="w-3.5 h-3.5 text-emerald-600" />
               ) : (
-                <Sparkles className="w-3.5 h-3.5 text-amber-600" />
+                <Sparkles className="w-3.5 h-3.5 text-brand-600" />
               )}
-              <span>{aiMeta.mode}</span>
+              <span>{pillText}</span>
             </div>
           </div>
 

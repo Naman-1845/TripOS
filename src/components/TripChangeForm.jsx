@@ -4,7 +4,8 @@ import { calculateTripDeltas } from '../services/recoveryEngine.js';
 
 export default function TripChangeForm({
   activeTrip,
-  onSubmitChanges
+  onSubmitChanges,
+  isRecovering = false
 }) {
   const [durationDeltaInput, setDurationDeltaInput] = useState('');
   const [budgetDeltaInput, setBudgetDeltaInput] = useState('');
@@ -315,15 +316,15 @@ export default function TripChangeForm({
 
           <button
             type="submit"
-            disabled={!hasAnyChange || !deltaCalc.isValid}
-            className={`w-full sm:w-auto px-6 py-2.5 rounded-xl font-bold text-xs shadow-md transition-all flex items-center justify-center gap-2 cursor-pointer ${
-              !hasAnyChange || !deltaCalc.isValid
+            disabled={!hasAnyChange || !deltaCalc.isValid || isRecovering}
+            className={`w-full sm:w-auto px-6 py-2.5 rounded-xl font-bold text-xs shadow-md transition-all flex items-center justify-center gap-2 ${
+              !hasAnyChange || !deltaCalc.isValid || isRecovering
                 ? 'bg-slate-200 text-slate-400 cursor-not-allowed shadow-none'
-                : 'bg-indigo-600 hover:bg-indigo-700 text-white shadow-indigo-500/20'
+                : 'bg-indigo-600 hover:bg-indigo-700 text-white shadow-indigo-500/20 cursor-pointer'
             }`}
           >
-            <Sparkles className="w-4 h-4" />
-            <span>Generate Recovery Proposal</span>
+            <Sparkles className={`w-4 h-4 ${isRecovering ? 'animate-spin' : ''}`} />
+            <span>{isRecovering ? 'Evaluating with Agent...' : 'Generate Recovery Proposal'}</span>
           </button>
         </div>
       </form>

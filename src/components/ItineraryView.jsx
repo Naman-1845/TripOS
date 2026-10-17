@@ -52,7 +52,7 @@ export default function ItineraryView({
           <AlertTriangle className="w-5 h-5 text-amber-600 shrink-0 mt-0.5" />
           <div className="text-xs">
             <div className="font-bold text-amber-900 mb-0.5">
-              Simulated Disruption Active: Outdoor Activities Rerouted
+              Simulated Disruption Scenario (Demo Mode — Not a Live Weather Report)
             </div>
             <div>{simulatedDisruption.reason}</div>
             <div className="text-amber-700 mt-1 font-medium">

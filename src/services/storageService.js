@@ -41,16 +41,18 @@ export const StorageService = {
    * Returns array of all saved trips
    */
   getSavedTrips() {
-    return safeGet(STORAGE_KEYS.SAVED_TRIPS, []);
+    const data = safeGet(STORAGE_KEYS.SAVED_TRIPS, []);
+    return Array.isArray(data) ? data : [];
   },
 
   /**
    * Saves or updates a trip in the saved trips collection.
    * Ensures trips do not overwrite each other by checking trip.id.
+   * Throws an error if storage persistence fails.
    */
   saveTrip(trip) {
-    if (!trip || !trip.id) {
-      throw new Error('Trip must have a valid unique ID to be saved.');
+    if (!trip || !trip.id || !trip.inputs) {
+      throw new Error('Trip must have a valid unique ID and inputs to be saved.');
     }
     const trips = this.getSavedTrips();
     const existingIndex = trips.findIndex(t => t.id === trip.id);
@@ -69,7 +71,10 @@ export const StorageService = {
       updatedList = [tripToSave, ...trips];
     }
 
-    safeSet(STORAGE_KEYS.SAVED_TRIPS, updatedList);
+    const saved = safeSet(STORAGE_KEYS.SAVED_TRIPS, updatedList);
+    if (!saved) {
+      throw new Error('Failed to persist trip to browser storage.');
+    }
     safeSet(STORAGE_KEYS.ACTIVE_TRIP_ID, trip.id);
     return tripToSave;
   },
@@ -115,17 +120,36 @@ export const StorageService = {
    * Returns full recovery audit log history
    */
   getRecoveryHistory() {
-    return safeGet(STORAGE_KEYS.RECOVERY_HISTORY, []);
+    const data = safeGet(STORAGE_KEYS.RECOVERY_HISTORY, []);
+    return Array.isArray(data) ? data : [];
   },
 
   /**
-   * Appends an entry to recovery history
+   * Appends an entry to recovery history.
+   * Prevents duplicate or contradictory audit entries for the same proposal.
    */
   addRecoveryHistoryEntry(entry) {
-    if (!entry) return;
+    if (!entry || !entry.id) return this.getRecoveryHistory();
     const history = this.getRecoveryHistory();
+
+    // Check for existing log with same ID or same proposalId
+    const existing = history.find(e =>
+      e.id === entry.id || (e.proposalId && entry.proposalId && e.proposalId === entry.proposalId)
+    );
+
+    if (existing) {
+      if (existing.action !== entry.action) {
+        console.warn(`[TripOS Storage] Contradictory audit log for proposal ${entry.proposalId}: already ${existing.action}, attempted ${entry.action}. Ignored.`);
+      }
+      // Deduplicate: do not add duplicate entry
+      return history;
+    }
+
     const updated = [entry, ...history].slice(0, 50); // keep recent 50 logs
-    safeSet(STORAGE_KEYS.RECOVERY_HISTORY, updated);
+    const saved = safeSet(STORAGE_KEYS.RECOVERY_HISTORY, updated);
+    if (!saved) {
+      console.warn('[TripOS Storage] Failed to persist recovery history.');
+    }
     return updated;
   },
 

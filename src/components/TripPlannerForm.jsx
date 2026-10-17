@@ -41,6 +41,12 @@ export default function TripPlannerForm({
     }
   };
 
+  const handleRecoveryClick = () => {
+    if (validate()) {
+      onTriggerRecovery();
+    }
+  };
+
   const toggleInterest = (interest) => {
     const current = formData.interests || [];
     let updated;
@@ -320,7 +326,7 @@ export default function TripPlannerForm({
             {hasActiveTrip ? (
               <button
                 type="button"
-                onClick={onTriggerRecovery}
+                onClick={handleRecoveryClick}
                 className="w-full sm:w-auto px-5 py-2.5 bg-brand-600 hover:bg-brand-700 text-white font-bold text-sm rounded-xl shadow-md shadow-brand-500/20 transition-all flex items-center justify-center gap-2 cursor-pointer"
               >
                 <Sparkles className="w-4 h-4" />

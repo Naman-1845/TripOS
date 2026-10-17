@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import Navbar from './components/Navbar.jsx';
 import TripPlannerForm from './components/TripPlannerForm.jsx';
 import BudgetManager from './components/BudgetManager.jsx';
@@ -20,6 +20,7 @@ import {
   isProposalStale
 } from './services/recoveryEngine.js';
 import { StorageService } from './services/storageService.js';
+import { getAgentStatus, requestTripRecovery } from './services/agentClient.js';
 import { Sparkles, CheckCircle2, AlertCircle } from 'lucide-react';
 
 export default function App() {
@@ -39,13 +40,27 @@ export default function App() {
   const [drawerTab, setDrawerTab] = useState('saved');
   const [toastMessage, setToastMessage] = useState(null);
 
+  // 5. Agent Backend Status & Recovery State
+  const [agentStatus, setAgentStatus] = useState(null);
+  const [isRecovering, setIsRecovering] = useState(false);
+  const [isApproving, setIsApproving] = useState(false);
+  const [isRejecting, setIsRejecting] = useState(false);
+  const recoveryRequestIdRef = useRef(0);
+
   const showToast = (text, type = 'info') => {
     setToastMessage({ text, type });
     setTimeout(() => setToastMessage(null), 4000);
   };
 
-  // On initial mount: load saved trips, history, and active trip
+  // On initial mount: load saved trips, history, active trip, and agent status
   useEffect(() => {
+    // Fetch live agent backend status
+    getAgentStatus().then(status => {
+      setAgentStatus(status);
+    }).catch(() => {
+      setAgentStatus({ isOnline: false, mode: 'local-offline-fallback' });
+    });
+
     const trips = StorageService.getSavedTrips();
     const history = StorageService.getRecoveryHistory();
     setSavedTrips(trips);
@@ -130,47 +145,137 @@ export default function App() {
     createAndActivateTrip(formData);
   };
 
-  // Recovery Engine: Evaluate changes when active trip exists
-  const handleTriggerRecovery = (overrides = {}) => {
+  // Recovery Engine: Evaluate changes when active trip exists via Agent Server
+  const handleTriggerRecovery = async (overrides = {}) => {
     if (!activeTrip) {
       createAndActivateTrip(formData);
       return;
     }
 
-    const proposedInputs = {
-      ...formData,
-      ...overrides
-    };
+    const currentReqId = ++recoveryRequestIdRef.current;
+    setIsRecovering(true);
 
-    const proposal = generateRecoveryProposal(activeTrip, proposedInputs);
-    setPendingProposal(proposal);
+    try {
+      // Determine target inputs by combining activeTrip baseline, current form state, and overrides
+      const targetDestination = (overrides.destination !== undefined ? overrides.destination : formData.destination) || activeTrip.inputs.destination;
+      const targetOrigin = (overrides.origin !== undefined ? overrides.origin : formData.origin) || activeTrip.inputs.origin;
+      const targetBudget = (overrides.budget !== undefined ? overrides.budget : formData.budget) ?? activeTrip.inputs.budget;
+      const targetDuration = (overrides.duration !== undefined ? overrides.duration : formData.duration) ?? activeTrip.inputs.duration;
+      const targetTravellers = (overrides.travellers !== undefined ? overrides.travellers : formData.travellers) ?? activeTrip.inputs.travellers;
+      const targetTransport = (overrides.transportPreference !== undefined ? overrides.transportPreference : formData.transportPreference) || activeTrip.inputs.transportPreference;
+      const targetAccommodation = (overrides.accommodationPreference !== undefined ? overrides.accommodationPreference : formData.accommodationPreference) || activeTrip.inputs.accommodationPreference;
+      const targetInterests = (overrides.interests !== undefined ? overrides.interests : formData.interests) || activeTrip.inputs.interests;
+
+      const simulatedDisruption = overrides.simulatedDisruption !== undefined
+        ? overrides.simulatedDisruption
+        : (activeTrip.simulatedDisruption || null);
+
+      const requestedChanges = {};
+      if (targetDestination !== activeTrip.inputs.destination) requestedChanges.destination = targetDestination;
+      if (targetOrigin !== activeTrip.inputs.origin) requestedChanges.origin = targetOrigin;
+      if (targetBudget !== activeTrip.inputs.budget) requestedChanges.budget = targetBudget;
+      if (targetDuration !== activeTrip.inputs.duration) requestedChanges.duration = targetDuration;
+      if (targetTravellers !== activeTrip.inputs.travellers) requestedChanges.travellers = targetTravellers;
+      if (targetTransport !== activeTrip.inputs.transportPreference) requestedChanges.transportPreference = targetTransport;
+      if (targetAccommodation !== activeTrip.inputs.accommodationPreference) requestedChanges.accommodationPreference = targetAccommodation;
+      if (targetInterests) requestedChanges.interests = targetInterests;
+      if (overrides.budgetDelta !== undefined) requestedChanges.budgetDelta = overrides.budgetDelta;
+      if (overrides.durationDelta !== undefined) requestedChanges.durationDelta = overrides.durationDelta;
+      if (overrides.userReason) requestedChanges.userReason = overrides.userReason;
+
+      // Keep form inputs synchronized with the recovery parameters being evaluated
+      setFormData(prev => ({
+        ...prev,
+        destination: targetDestination,
+        origin: targetOrigin,
+        budget: targetBudget,
+        duration: targetDuration,
+        travellers: targetTravellers,
+        transportPreference: targetTransport,
+        accommodationPreference: targetAccommodation,
+        interests: targetInterests
+      }));
+
+      const recoveryResult = await requestTripRecovery({
+        activeTrip,
+        requestedChanges,
+        simulatedDisruption
+      });
+
+      // Guard: Ignore response if a newer recovery request was already launched
+      if (currentReqId !== recoveryRequestIdRef.current) {
+        return;
+      }
+
+      setPendingProposal(recoveryResult.proposal);
+
+      // Transparent notification of engine source
+      if (recoveryResult.mode === 'live-llm-agent') {
+        showToast(`Recovery proposal drafted by Google Gemini (${recoveryResult.model || 'gemini-3.8-flash'})!`, 'success');
+      } else if (recoveryResult.mode === 'deterministic-fallback') {
+        showToast('Recovery proposal evaluated via server deterministic tool runner.', 'info');
+      } else if (recoveryResult.mode === 'deterministic-fallback-on-error') {
+        showToast('Gemini API encountered an error; safely executed server deterministic fallback.', 'info');
+      } else {
+        showToast('Backend offline; recovery proposal generated via local heuristic engine.', 'info');
+      }
+    } catch (err) {
+      console.error('[TripOS] Recovery generation error:', err);
+      showToast(`Recovery failed: ${err.message}`, 'error');
+    } finally {
+      setIsRecovering(false);
+    }
   };
 
   // Handle mid-trip changes submitted from TripChangeForm ("Update Trip Due to Changes")
-  const handleApplyTripChanges = ({ durationDelta, budgetDelta, userReason, resultingDuration, resultingBudget }) => {
+  const handleApplyTripChanges = async ({ durationDelta, budgetDelta, userReason, resultingDuration, resultingBudget }) => {
     if (!activeTrip) return;
 
-    // Generate proposal from updated duration and budget
-    const proposal = generateRecoveryProposal(activeTrip, {
-      duration: resultingDuration,
-      budget: resultingBudget,
-      userReason: userReason || undefined
-    });
+    const currentReqId = ++recoveryRequestIdRef.current;
+    setIsRecovering(true);
 
-    // Update formData to match proposed inputs so preview and stale checks remain synchronized
-    setFormData(prev => ({
-      ...prev,
-      duration: resultingDuration,
-      budget: resultingBudget
-    }));
+    try {
+      if (resultingDuration) setFormData(prev => ({ ...prev, duration: resultingDuration }));
+      if (resultingBudget) setFormData(prev => ({ ...prev, budget: resultingBudget }));
 
-    setPendingProposal(proposal);
+      const recoveryResult = await requestTripRecovery({
+        activeTrip,
+        requestedChanges: {
+          durationDelta,
+          budgetDelta,
+          duration: resultingDuration,
+          budget: resultingBudget,
+          userReason: userReason || undefined
+        }
+      });
+
+      // Guard against out-of-order responses
+      if (currentReqId !== recoveryRequestIdRef.current) {
+        return;
+      }
+
+      setPendingProposal(recoveryResult.proposal);
+
+      if (recoveryResult.mode === 'live-llm-agent') {
+        showToast(`Recovery proposal drafted by Google Gemini (${recoveryResult.model || 'gemini-3.8-flash'})!`, 'success');
+      } else if (recoveryResult.mode === 'deterministic-fallback') {
+        showToast('Recovery proposal evaluated via server deterministic tool runner.', 'info');
+      } else {
+        showToast('Recovery proposal generated via local heuristic engine.', 'info');
+      }
+    } catch (err) {
+      console.error('[TripOS] Mid-trip delta recovery error:', err);
+      showToast(`Recovery failed: ${err.message}`, 'error');
+    } finally {
+      setIsRecovering(false);
+    }
   };
 
   // Proposal Action: APPROVE
-  const handleApproveProposal = () => {
-    if (!pendingProposal || !activeTrip) return;
+  const handleApproveProposal = async () => {
+    if (!pendingProposal || !activeTrip || isApproving || isRejecting) return;
 
+    setIsApproving(true);
     try {
       const { updatedTrip, auditLogEntry } = applyProposal(activeTrip, pendingProposal);
 
@@ -186,15 +291,18 @@ export default function App() {
 
       showToast('Proposal approved! Active itinerary & budget updated.', 'success');
     } catch (err) {
-      console.error(err);
-      showToast('Failed to apply proposal.', 'error');
+      console.error('[TripOS] Proposal approval error:', err);
+      showToast(`Failed to apply proposal: ${err.message}`, 'error');
+    } finally {
+      setIsApproving(false);
     }
   };
 
   // Proposal Action: REJECT
   const handleRejectProposal = () => {
-    if (!pendingProposal || !activeTrip) return;
+    if (!pendingProposal || !activeTrip || isApproving || isRejecting) return;
 
+    setIsRejecting(true);
     try {
       const { preservedTrip, auditLogEntry } = rejectProposal(activeTrip, pendingProposal);
 
@@ -210,8 +318,10 @@ export default function App() {
 
       showToast('Proposal rejected. Original active itinerary remains 100% unchanged.', 'info');
     } catch (err) {
-      console.error(err);
-      showToast('Failed to reject proposal.', 'error');
+      console.error('[TripOS] Proposal rejection error:', err);
+      showToast(`Failed to reject proposal: ${err.message}`, 'error');
+    } finally {
+      setIsRejecting(false);
     }
   };
 
@@ -313,25 +423,43 @@ export default function App() {
         onResetTrip={handleResetTrip}
         savedTripsCount={savedTrips.length}
         historyCount={recoveryHistory.length}
+        agentStatus={agentStatus}
       />
 
       {/* Main Content Area */}
       <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-8">
+        {/* Live Recovery Agent In-Progress Banner */}
+        {isRecovering && (
+          <div className="mb-6 p-4 rounded-2xl bg-indigo-900 text-white shadow-xl flex items-center justify-between animate-pulse border border-indigo-700">
+            <div className="flex items-center gap-3">
+              <Sparkles className="w-5 h-5 text-indigo-300 animate-spin" />
+              <div>
+                <h4 className="text-sm font-bold">Autonomous Recovery Agent Active</h4>
+                <p className="text-xs text-indigo-200 mt-0.5">
+                  Evaluating catalog options, calculating verified budgets, and drafting an immutable proposal...
+                </p>
+              </div>
+            </div>
+            <span className="px-3 py-1 bg-indigo-800 text-indigo-200 text-xs font-semibold rounded-full border border-indigo-600">
+              Processing Tools...
+            </span>
+          </div>
+        )}
+
         {/* Interactive Disruption & Demonstration Scenarios Bar */}
         <DisruptionSimulator
           activeTrip={activeTrip}
+          isRecovering={isRecovering}
           onSimulateBudgetCut={() => {
-            setFormData(prev => ({ ...prev, budget: 16000 }));
             handleTriggerRecovery({ budget: 16000 });
           }}
           onSimulateDurationReduction={() => {
-            setFormData(prev => ({ ...prev, duration: 3 }));
             handleTriggerRecovery({ duration: 3 });
           }}
           onSimulateWeatherDisruption={() => {
             const disruption = {
               outdoorUnsuitable: true,
-              reason: 'Severe Mountain Blizzard & Avalanche Warning: High-altitude outdoor excursions suspended.'
+              reason: 'Simulated Weather Disruption (Not a Live Weather Report): High-altitude mountain blizzard & avalanche alert.'
             };
             handleTriggerRecovery({ simulatedDisruption: disruption });
           }}
@@ -344,6 +472,7 @@ export default function App() {
         {activeTrip && (
           <TripChangeForm
             activeTrip={activeTrip}
+            isRecovering={isRecovering}
             onSubmitChanges={handleApplyTripChanges}
           />
         )}
@@ -373,7 +502,7 @@ export default function App() {
               handleTriggerRecovery({
                 simulatedDisruption: {
                   outdoorUnsuitable: true,
-                  reason: 'Simulated adverse rainfall & road closure'
+                  reason: 'Simulated Weather Disruption (Not a Live Weather Report): Adverse rainfall & road closure alert.'
                 }
               });
             }}
@@ -394,11 +523,15 @@ export default function App() {
       {pendingProposal && (
         <RecoveryModal
           proposal={pendingProposal}
+          activeTrip={activeTrip}
           isStale={isProposalStale(pendingProposal, formData, activeTrip)}
+          isApproving={isApproving}
+          isRejecting={isRejecting}
           onApprove={handleApproveProposal}
           onReject={handleRejectProposal}
           onRegenerate={handleRegenerateProposal}
           onClose={() => {
+            if (isApproving || isRejecting) return;
             setPendingProposal(null);
             if (activeTrip) setFormData(activeTrip.inputs);
           }}

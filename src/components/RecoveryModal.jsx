@@ -1,15 +1,46 @@
 import React from 'react';
 import { Sparkles, Check, X, ArrowRight, TrendingDown, TrendingUp, AlertTriangle, ShieldCheck, RefreshCw } from 'lucide-react';
+import { validateRecoveryProposal } from '../services/recoveryEngine.js';
 
 export default function RecoveryModal({
   proposal,
+  activeTrip = null,
   isStale = false,
+  isApproving = false,
+  isRejecting = false,
   onApprove,
   onReject,
   onRegenerate,
   onClose
 }) {
   if (!proposal) return null;
+
+  const validation = validateRecoveryProposal(proposal, activeTrip);
+
+  const disableReasons = [];
+  if (!proposal) disableReasons.push('proposal is missing');
+  if (proposal && proposal.status !== 'pending') disableReasons.push(`proposal status is "${proposal.status}" (expected "pending")`);
+  if (!validation.isValid) disableReasons.push(`validation failed: ${validation.errors.join('; ')}`);
+  if (isStale) disableReasons.push('proposal is stale');
+  if (isApproving) disableReasons.push('approval in progress');
+  if (isRejecting) disableReasons.push('rejection in progress');
+
+  const isApproveDisabled = disableReasons.length > 0;
+
+  // Safe diagnostics (never logs API keys or sensitive secrets)
+  console.log('[TripOS RecoveryModal Diagnostics]', {
+    activeTripDestination: activeTrip?.inputs?.destination ?? proposal?.originalSnapshot?.inputs?.destination ?? 'N/A',
+    activeTripBudget: activeTrip?.inputs?.budget ?? proposal?.originalSnapshot?.inputs?.budget ?? 'N/A',
+    proposalProposedDestination: proposal?.proposedPlan?.inputs?.destination ?? 'N/A',
+    proposalProposedBudget: proposal?.proposedPlan?.inputs?.budget ?? 'N/A',
+    proposalStatus: proposal?.status ?? 'N/A',
+    proposalId: proposal?.proposalId ?? 'N/A',
+    isStale: Boolean(isStale),
+    isApproving: Boolean(isApproving),
+    isRejecting: Boolean(isRejecting),
+    validateRecoveryProposalResult: validation,
+    exactDisableReason: isApproveDisabled ? disableReasons.join(' | ') : 'none (button enabled)'
+  });
 
   const {
     triggerReasons = [],
@@ -34,11 +65,32 @@ export default function RecoveryModal({
               <Sparkles className="w-5 h-5" />
             </div>
             <div>
-              <div className="flex items-center gap-2">
+              <div className="flex flex-wrap items-center gap-2">
                 <h3 className="text-lg font-bold">Autonomous Travel Recovery Engine</h3>
                 <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-brand-400 text-slate-950 uppercase">
                   Proposed Solution
                 </span>
+                {proposal.executionMode === 'live-llm-agent' ? (
+                  <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-emerald-500/20 text-emerald-300 border border-emerald-500/40">
+                    <ShieldCheck className="w-3 h-3 text-emerald-400" />
+                    Google Gemini ({proposal.model || 'gemini-3.8-flash'})
+                  </span>
+                ) : proposal.executionMode === 'deterministic-fallback' ? (
+                  <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-blue-500/20 text-blue-300 border border-blue-500/40">
+                    <Sparkles className="w-3 h-3 text-blue-400" />
+                    Server Tool Runner (Deterministic)
+                  </span>
+                ) : proposal.executionMode === 'deterministic-fallback-on-error' ? (
+                  <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-amber-500/20 text-amber-300 border border-amber-500/40">
+                    <AlertTriangle className="w-3 h-3 text-amber-400" />
+                    Server Fallback (Provider Error Handled)
+                  </span>
+                ) : (
+                  <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-amber-500/20 text-amber-300 border border-amber-500/40">
+                    <Sparkles className="w-3 h-3 text-amber-400" />
+                    Offline Heuristic Fallback (Local Engine)
+                  </span>
+                )}
               </div>
               <p className="text-xs text-slate-400 mt-0.5">
                 Side-by-side evaluation of active itinerary vs proposed recovery adjustments.
@@ -47,7 +99,12 @@ export default function RecoveryModal({
           </div>
           <button
             onClick={onClose}
-            className="p-2 text-slate-400 hover:text-white rounded-lg hover:bg-slate-800 transition-colors cursor-pointer"
+            disabled={isApproving || isRejecting}
+            className={`p-2 rounded-lg transition-colors ${
+              isApproving || isRejecting
+                ? 'text-slate-600 cursor-not-allowed'
+                : 'text-slate-400 hover:text-white hover:bg-slate-800 cursor-pointer'
+            }`}
           >
             <X className="w-5 h-5" />
           </button>
@@ -72,6 +129,17 @@ export default function RecoveryModal({
         )}
 
         <div className="p-6 space-y-6 max-h-[75vh] overflow-y-auto">
+          {/* Agent Summary & Explanation */}
+          {(proposal.agentSummary || proposal.agentExplanation) && (
+            <div className="p-4 rounded-2xl bg-slate-50 border border-slate-200 text-xs text-slate-700">
+              <span className="font-bold text-slate-900 block mb-1 flex items-center gap-1.5">
+                <Sparkles className="w-3.5 h-3.5 text-brand-600" />
+                Agent Recommendation Rationale:
+              </span>
+              <p>{proposal.agentSummary || proposal.agentExplanation}</p>
+            </div>
+          )}
+
           {/* Section 1: Engine Diagnostics (Triggers & Actions) */}
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             {/* Why was recovery triggered? */}
@@ -106,6 +174,36 @@ export default function RecoveryModal({
               </ul>
             </div>
           </div>
+
+          {/* Authentic Agent Execution Trace (Expandable) */}
+          {proposal.trace && proposal.trace.length > 0 && (
+            <div className="rounded-2xl bg-slate-900 border border-slate-800 p-4 text-white">
+              <details className="group">
+                <summary className="text-xs font-bold uppercase tracking-wider text-slate-300 flex items-center justify-between cursor-pointer list-none">
+                  <span className="flex items-center gap-2">
+                    <Sparkles className="w-4 h-4 text-brand-400" />
+                    Authentic Agent Tool Execution Trace ({proposal.trace.length} Steps)
+                  </span>
+                  <span className="text-[11px] text-brand-400 font-semibold group-open:rotate-180 transition-transform">▼</span>
+                </summary>
+                <div className="mt-3 space-y-2 pt-2 border-t border-slate-800 text-xs">
+                  {proposal.trace.map((t, idx) => (
+                    <div key={idx} className="p-2.5 rounded-xl bg-slate-800/80 border border-slate-700/60 font-mono text-[11px]">
+                      <div className="flex items-center justify-between text-brand-300 font-bold mb-1">
+                        <span>Step {t.step || idx + 1}: {t.toolCall?.name}</span>
+                      </div>
+                      <p className="text-slate-300 font-sans text-xs mb-1.5">{t.thought}</p>
+                      {t.toolCall?.args && Object.keys(t.toolCall.args).length > 0 && (
+                        <div className="text-[10px] text-slate-400 bg-slate-950/70 p-1.5 rounded">
+                          <strong>Args:</strong> {JSON.stringify(t.toolCall.args)}
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              </details>
+            </div>
+          )}
 
           {/* Section 2: Side-by-Side Comparison Grid */}
           <div>
@@ -258,23 +356,28 @@ export default function RecoveryModal({
           <div className="flex items-center gap-3 w-full sm:w-auto">
             <button
               onClick={onReject}
-              className="w-full sm:w-auto px-5 py-2.5 rounded-xl border border-slate-300 bg-white text-slate-700 hover:bg-slate-100 hover:text-slate-900 font-bold text-xs transition-colors flex items-center justify-center gap-1.5 cursor-pointer"
+              disabled={isApproving || isRejecting}
+              className={`w-full sm:w-auto px-5 py-2.5 rounded-xl border border-slate-300 font-bold text-xs transition-colors flex items-center justify-center gap-1.5 ${
+                isApproving || isRejecting
+                  ? 'bg-slate-100 text-slate-400 cursor-not-allowed'
+                  : 'bg-white text-slate-700 hover:bg-slate-100 hover:text-slate-900 cursor-pointer'
+              }`}
             >
               <X className="w-4 h-4 text-slate-500" />
-              <span>Reject Proposal (Keep Original)</span>
+              <span>{isRejecting ? 'Rejecting...' : 'Reject Proposal (Keep Original)'}</span>
             </button>
 
             <button
               onClick={onApprove}
-              disabled={isStale}
-              className={`w-full sm:w-auto px-6 py-2.5 rounded-xl text-white font-bold text-xs shadow-md transition-all flex items-center justify-center gap-1.5 cursor-pointer ${
-                isStale
+              disabled={isApproveDisabled}
+              className={`w-full sm:w-auto px-6 py-2.5 rounded-xl text-white font-bold text-xs shadow-md transition-all flex items-center justify-center gap-1.5 ${
+                isApproveDisabled
                   ? 'bg-slate-400 cursor-not-allowed opacity-60'
-                  : 'bg-emerald-600 hover:bg-emerald-700 shadow-emerald-600/20'
+                  : 'bg-emerald-600 hover:bg-emerald-700 shadow-emerald-600/20 cursor-pointer'
               }`}
             >
               <Check className="w-4 h-4" />
-              <span>Approve & Apply Proposal</span>
+              <span>{isApproving ? 'Applying Proposal...' : 'Approve & Apply Proposal'}</span>
             </button>
           </div>
         </div>

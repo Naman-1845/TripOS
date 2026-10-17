@@ -6,7 +6,8 @@ export default function DisruptionSimulator({
   onSimulateBudgetCut,
   onSimulateDurationReduction,
   onSimulateWeatherDisruption,
-  onClearDisruptions
+  onClearDisruptions,
+  isRecovering = false
 }) {
   if (!activeTrip) return null;
 
@@ -40,7 +41,10 @@ export default function DisruptionSimulator({
         {/* Scenario A: Budget Cut */}
         <button
           onClick={onSimulateBudgetCut}
-          className="p-3.5 rounded-xl bg-slate-800/90 hover:bg-slate-800 border border-slate-700 hover:border-brand-500/50 text-left transition-all cursor-pointer group"
+          disabled={isRecovering}
+          className={`p-3.5 rounded-xl bg-slate-800/90 hover:bg-slate-800 border border-slate-700 hover:border-brand-500/50 text-left transition-all group ${
+            isRecovering ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer'
+          }`}
         >
           <div className="flex items-center gap-2 text-indigo-400 font-bold text-xs mb-1">
             <ArrowDownCircle className="w-4 h-4 group-hover:translate-y-0.5 transition-transform" />
@@ -57,7 +61,10 @@ export default function DisruptionSimulator({
         {/* Scenario B: Duration Reduction */}
         <button
           onClick={onSimulateDurationReduction}
-          className="p-3.5 rounded-xl bg-slate-800/90 hover:bg-slate-800 border border-slate-700 hover:border-amber-500/50 text-left transition-all cursor-pointer group"
+          disabled={isRecovering}
+          className={`p-3.5 rounded-xl bg-slate-800/90 hover:bg-slate-800 border border-slate-700 hover:border-amber-500/50 text-left transition-all group ${
+            isRecovering ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer'
+          }`}
         >
           <div className="flex items-center gap-2 text-amber-400 font-bold text-xs mb-1">
             <Clock className="w-4 h-4 group-hover:scale-110 transition-transform" />
@@ -74,7 +81,10 @@ export default function DisruptionSimulator({
         {/* Scenario C: Weather Disruption */}
         <button
           onClick={isWeatherDisrupted ? onClearDisruptions : onSimulateWeatherDisruption}
-          className={`p-3.5 rounded-xl border text-left transition-all cursor-pointer group ${
+          disabled={isRecovering}
+          className={`p-3.5 rounded-xl border text-left transition-all group ${
+            isRecovering ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer'
+          } ${
             isWeatherDisrupted
               ? 'bg-emerald-950/40 border-emerald-500/50 hover:bg-emerald-950/60'
               : 'bg-slate-800/90 hover:bg-slate-800 border-slate-700 hover:border-rose-500/50'

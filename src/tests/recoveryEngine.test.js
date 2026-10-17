@@ -352,6 +352,109 @@ describe('Feature: Update Trip Due to Changes', () => {
     const retrievedA = StorageService.getTripById('trip_isolation_A');
     expect(retrievedA.inputs.budget).toBe(16000);
   });
+
+  it('Scenario 1: Budget reduction with deficit clearly explains when it cannot fit within budget', () => {
+    // Cut budget severely to ₹5,000 for a 5-day trip for 2 travellers
+    const proposal = generateRecoveryProposal(baseTrip, { budget: 5000 });
+
+    // Active trip MUST remain unchanged before approval
+    expect(baseTrip.inputs.budget).toBe(20000);
+
+    // Proposal reflects the target budget
+    expect(proposal.proposedPlan.inputs.budget).toBe(5000);
+    expect(proposal.proposedPlan.budgetBreakdown.isOverBudget).toBe(true);
+    expect(proposal.proposedPlan.budgetBreakdown.deficit).toBeGreaterThan(0);
+
+    // Actions taken and agent explanation clearly explain the deficit
+    expect(proposal.actionsTaken.some(a => a.includes('exceed the reduced budget'))).toBe(true);
+    expect(proposal.agentExplanation).toContain('exceeding the target ₹5,000 budget');
+  });
+
+  it('Scenario 2: Shorter duration reflects exact days and consistent day-by-day itinerary', () => {
+    // Shorten from 5 days to 3 days
+    const proposal = generateRecoveryProposal(baseTrip, { duration: 3 });
+
+    // Original trip unchanged
+    expect(baseTrip.inputs.duration).toBe(5);
+    expect(baseTrip.itinerary.days.length).toBe(5);
+
+    // Proposed plan has exactly 3 days with valid daily schedules
+    expect(proposal.proposedPlan.inputs.duration).toBe(3);
+    expect(proposal.proposedPlan.itinerary.days).toHaveLength(3);
+    proposal.proposedPlan.itinerary.days.forEach((day, idx) => {
+      expect(day.dayNumber).toBe(idx + 1);
+      expect(day.morning).toBeDefined();
+      expect(day.afternoon).toBeDefined();
+      expect(day.evening).toBeDefined();
+    });
+  });
+
+  it('Scenario 3: Weather disruption replaces outdoor activities and includes simulated disruption label', () => {
+    const proposal = generateRecoveryProposal(baseTrip, {
+      simulatedDisruption: {
+        outdoorUnsuitable: true,
+        reason: 'Simulated Weather Disruption (Not a Live Weather Report): Heavy mountain blizzard.'
+      }
+    });
+
+    expect(proposal.proposedPlan.simulatedDisruption.outdoorUnsuitable).toBe(true);
+    expect(proposal.proposedPlan.simulatedDisruption.reason).toContain('Not a Live Weather Report');
+
+    // Itinerary days have replaced outdoor activities
+    const days = proposal.proposedPlan.itinerary.days;
+    const unsuitableSlots = [];
+    days.forEach(day => {
+      ['morning', 'afternoon', 'evening'].forEach(slot => {
+        if (day[slot]?.isUnsuitable) {
+          unsuitableSlots.push(day[slot]);
+        }
+      });
+    });
+    expect(unsuitableSlots.length).toBeGreaterThan(0);
+    unsuitableSlots.forEach(slot => {
+      expect(slot.replacementActivity).toBeDefined();
+      expect(slot.replacementActivity.isOutdoor).toBe(false);
+    });
+  });
+
+  it('Scenario 5: Rejection preserves active trip and proposal cannot subsequently be approved', () => {
+    const proposal = generateRecoveryProposal(baseTrip, { budget: 16000 });
+    const { preservedTrip, resolvedProposal } = rejectProposal(baseTrip, proposal);
+
+    // Active trip is strictly unchanged
+    expect(preservedTrip.inputs.budget).toBe(20000);
+    expect(baseTrip.inputs.budget).toBe(20000);
+
+    // Proposal status is rejected
+    expect(resolvedProposal.status).toBe('rejected');
+
+    // Cannot subsequently be approved
+    expect(() => applyProposal(baseTrip, resolvedProposal)).toThrow(/Only pending proposals can be approved/);
+  });
+
+  it('Scenario 6: Stale proposal lifecycle: old proposal cannot be approved after input divergence, while newly generated proposal can', () => {
+    const proposal1 = generateRecoveryProposal(baseTrip, { duration: 3 });
+
+    // User changes trip inputs (e.g. destination changed to Goa)
+    const divergentFormInputs = { ...baseTrip.inputs, destination: 'Goa' };
+    expect(isProposalStale(proposal1, divergentFormInputs, baseTrip)).toBe(true);
+
+    // If active trip itself changed
+    const modifiedActiveTrip = {
+      ...baseTrip,
+      inputs: { ...baseTrip.inputs, duration: 4 }
+    };
+    expect(() => applyProposal(modifiedActiveTrip, proposal1)).toThrow(/Proposal is stale/);
+
+    // Generate Proposal 2 for the new inputs
+    const proposal2 = generateRecoveryProposal(baseTrip, { duration: 4 });
+    expect(isProposalStale(proposal2, proposal2.proposedPlan.inputs, baseTrip)).toBe(false);
+
+    // Newly generated proposal can be approved
+    const { updatedTrip, resolvedProposal } = applyProposal(baseTrip, proposal2);
+    expect(resolvedProposal.status).toBe('approved');
+    expect(updatedTrip.inputs.duration).toBe(4);
+  });
 });
 
 

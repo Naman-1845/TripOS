@@ -83,6 +83,9 @@ export const AGENT_TOOL_DEFINITIONS = [
       properties: {
         newDuration: { type: 'number', description: 'Revised duration in days (must be >= 1)' },
         newBudget: { type: 'number', description: 'Revised budget in ₹ (must be > 0)' },
+        newDestination: { type: 'string', description: 'Revised destination city from catalog' },
+        newOrigin: { type: 'string', description: 'Revised origin city' },
+        newTravellers: { type: 'number', description: 'Revised traveller count' },
         selectedTransportId: { type: 'string', description: 'Verified transport ID from catalog' },
         selectedAccommodationId: { type: 'string', description: 'Verified accommodation ID from catalog' },
         actionsTaken: {
@@ -337,6 +340,9 @@ export function draft_recovery_proposal({
   activeTrip,
   newDuration,
   newBudget,
+  newDestination,
+  newOrigin,
+  newTravellers,
   selectedTransportId,
   selectedAccommodationId,
   actionsTaken = [],
@@ -366,12 +372,21 @@ export function draft_recovery_proposal({
     throw new Error('draft_recovery_proposal: agentExplanation must be a non-empty string.');
   }
 
-  const destData = getDestinationData(activeTrip.inputs.destination);
+  const targetDestination = (newDestination && String(newDestination).trim()) || activeTrip.inputs.destination;
+  const targetOrigin = (newOrigin && String(newOrigin).trim()) || activeTrip.inputs.origin;
+  const targetTravellers = (newTravellers !== undefined && parseInt(newTravellers, 10) >= 1)
+    ? parseInt(newTravellers, 10)
+    : activeTrip.inputs.travellers;
+
+  const destData = getDestinationData(targetDestination);
+  if (!destData) {
+    throw new Error(`draft_recovery_proposal: unable to resolve catalog data for destination "${targetDestination}".`);
+  }
 
   // Resolve verified transport
   const chosenTransport = selectedTransportId
     ? destData?.transportOptions?.find(t => t.id === selectedTransportId)
-    : activeTrip.selectedTransport || destData?.transportOptions?.[0];
+    : (targetDestination === activeTrip.inputs.destination ? activeTrip.selectedTransport : null) || destData?.transportOptions?.[0];
 
   if (!chosenTransport) {
     throw new Error(`draft_recovery_proposal: could not resolve transport with ID "${selectedTransportId}".`);
@@ -380,7 +395,7 @@ export function draft_recovery_proposal({
   // Resolve verified accommodation
   const chosenAccommodation = selectedAccommodationId
     ? destData?.accommodations?.find(a => a.id === selectedAccommodationId)
-    : activeTrip.selectedAccommodation || destData?.accommodations?.[0];
+    : (targetDestination === activeTrip.inputs.destination ? activeTrip.selectedAccommodation : null) || destData?.accommodations?.[0];
 
   if (!chosenAccommodation) {
     throw new Error(`draft_recovery_proposal: could not resolve accommodation with ID "${selectedAccommodationId}".`);
@@ -392,8 +407,8 @@ export function draft_recovery_proposal({
 
   // Generate verified proposed itinerary
   const proposedItinerary = generateItinerary({
-    origin: activeTrip.inputs.origin,
-    destination: activeTrip.inputs.destination,
+    origin: targetOrigin,
+    destination: targetDestination,
     startDate: activeTrip.inputs.startDate,
     duration: safeDuration,
     interests: activeTrip.inputs.interests,
@@ -403,7 +418,7 @@ export function draft_recovery_proposal({
   // Calculate verified proposed budget
   const proposedBudgetBreakdown = calculateBudgetBreakdown({
     budget: safeBudget,
-    travellers: activeTrip.inputs.travellers,
+    travellers: targetTravellers,
     duration: safeDuration,
     selectedTransport: chosenTransport,
     selectedAccommodation: chosenAccommodation,
@@ -416,6 +431,18 @@ export function draft_recovery_proposal({
   const triggerReasons = [];
   if (userReason && String(userReason).trim()) {
     triggerReasons.push(`Reported change reason: "${String(userReason).trim()}"`);
+  }
+
+  if (targetDestination !== activeTrip.inputs.destination) {
+    triggerReasons.push(`Destination changed from ${activeTrip.inputs.destination} to ${targetDestination}`);
+  }
+
+  if (targetOrigin !== activeTrip.inputs.origin) {
+    triggerReasons.push(`Origin changed from ${activeTrip.inputs.origin} to ${targetOrigin}`);
+  }
+
+  if (targetTravellers !== activeTrip.inputs.travellers) {
+    triggerReasons.push(`Traveller count changed from ${activeTrip.inputs.travellers} to ${targetTravellers} person(s)`);
   }
 
   const durationDelta = safeDuration - activeTrip.inputs.duration;
@@ -469,8 +496,11 @@ export function draft_recovery_proposal({
     proposedPlan: {
       inputs: {
         ...activeTrip.inputs,
+        origin: targetOrigin,
+        destination: targetDestination,
         duration: safeDuration,
         budget: safeBudget,
+        travellers: targetTravellers,
         accommodationPreference: chosenAccommodation.type,
         transportPreference: chosenTransport.type
       },

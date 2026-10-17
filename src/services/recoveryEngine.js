@@ -44,6 +44,15 @@ export function generateRecoveryProposal(activeTrip, proposedChanges = {}) {
     triggerReasons.push(`Reported change reason: "${String(proposedChanges.userReason).trim()}"`);
   }
 
+  // Detect Destination & Origin Delta
+  if (next.destination !== prev.destination) {
+    triggerReasons.push(`Destination changed from ${prev.destination} to ${next.destination}`);
+    actionsTaken.push(`Selected verified travel and stay options catalog for ${next.destination}.`);
+  }
+  if (next.origin !== prev.origin) {
+    triggerReasons.push(`Origin city changed from ${prev.origin} to ${next.origin}`);
+  }
+
   // 1. Detect Budget Delta
   const budgetDelta = next.budget - prev.budget;
   if (budgetDelta < 0) {
@@ -208,11 +217,21 @@ export function generateRecoveryProposal(activeTrip, proposedChanges = {}) {
 
   const costDifference = proposedBudgetBreakdown.totalEstimatedExpenses - activeTrip.budgetBreakdown.totalEstimatedExpenses;
 
+  if (proposedBudgetBreakdown.isOverBudget) {
+    actionsTaken.push(`Note: Total expenses of ₹${proposedBudgetBreakdown.totalEstimatedExpenses.toLocaleString('en-IN')} exceed the reduced budget of ₹${next.budget.toLocaleString('en-IN')} by ₹${proposedBudgetBreakdown.deficit.toLocaleString('en-IN')}. Consider shortening trip duration.`);
+  }
+
+  const agentExplanation = proposedBudgetBreakdown.isOverBudget
+    ? `Recovery evaluated candidate adjustments for ${next.destination}. Total verified expenses are ₹${proposedBudgetBreakdown.totalEstimatedExpenses.toLocaleString('en-IN')}, exceeding the target ₹${next.budget.toLocaleString('en-IN')} budget by ₹${proposedBudgetBreakdown.deficit.toLocaleString('en-IN')}. Consider reducing duration to fit within budget.`
+    : `Recovery evaluated candidate adjustments for ${next.destination}. Total verified cost is ₹${proposedBudgetBreakdown.totalEstimatedExpenses.toLocaleString('en-IN')} against ₹${next.budget.toLocaleString('en-IN')} budget.`;
+
   return {
     proposalId: `prop_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
     createdAt: new Date().toISOString(),
     status: 'pending', // 'pending' | 'approved' | 'rejected' | 'stale'
     userReason: proposedChanges.userReason ? String(proposedChanges.userReason).trim() : null,
+    agentExplanation,
+    agentSummary: agentExplanation,
     triggerReasons,
     actionsTaken,
     costImpact: {
@@ -320,41 +339,125 @@ export function generateRecoveryProposalFromDeltas(activeTrip, { durationDelta, 
 /**
  * Checks if a pending proposal has become stale due to subsequent input changes
  */
-export function isProposalStale(proposal, currentFormInputs, currentActiveTrip = null) {
-  if (!proposal || proposal.status !== 'pending') return false;
+export function isProposalStale(proposal, currentFormInputs = null, currentActiveTrip = null) {
+  if (!proposal || proposal.status !== 'pending' || !proposal.proposedPlan?.inputs) return false;
 
   // Check if active trip changed identity or baseline inputs
   if (currentActiveTrip && proposal.originalSnapshot?.tripId) {
     if (currentActiveTrip.id !== proposal.originalSnapshot.tripId) return true;
-    if (
-      currentActiveTrip.inputs.duration !== proposal.originalSnapshot.inputs.duration ||
-      currentActiveTrip.inputs.budget !== proposal.originalSnapshot.inputs.budget
-    ) {
-      return true;
+    if (proposal.originalSnapshot.inputs) {
+      if (
+        currentActiveTrip.inputs.duration !== proposal.originalSnapshot.inputs.duration ||
+        currentActiveTrip.inputs.budget !== proposal.originalSnapshot.inputs.budget ||
+        currentActiveTrip.inputs.destination !== proposal.originalSnapshot.inputs.destination ||
+        currentActiveTrip.inputs.origin !== proposal.originalSnapshot.inputs.origin
+      ) {
+        return true;
+      }
     }
   }
 
   if (!currentFormInputs) return false;
   const pInputs = proposal.proposedPlan.inputs;
 
-  return (
-    pInputs.origin !== currentFormInputs.origin ||
-    pInputs.destination !== currentFormInputs.destination ||
-    pInputs.duration !== parseInt(currentFormInputs.duration, 10) ||
-    pInputs.travellers !== parseInt(currentFormInputs.travellers, 10) ||
-    pInputs.budget !== parseInt(currentFormInputs.budget, 10) ||
-    pInputs.accommodationPreference !== currentFormInputs.accommodationPreference ||
-    pInputs.transportPreference !== currentFormInputs.transportPreference
-  );
+  // Fundamental trip constraints: origin, destination, travellers count.
+  // Recovery proposals adapt accommodation, transport, schedule, and budget,
+  // but core trip identity (cities and travellers count) must remain consistent.
+  if (currentFormInputs.origin && pInputs.origin !== currentFormInputs.origin) return true;
+  if (currentFormInputs.destination && pInputs.destination !== currentFormInputs.destination) return true;
+  if (currentFormInputs.travellers && parseInt(currentFormInputs.travellers, 10) !== pInputs.travellers) return true;
+
+  return false;
+}
+
+/**
+ * Validates the structure and consistency of a recovery proposal
+ * @param {Object} proposal - Candidate recovery proposal
+ * @param {Object} [activeTrip] - Current active trip to check continuity against
+ * @param {Object} [currentFormInputs] - Optional current form inputs to verify synchronization
+ * @returns {{ isValid: boolean, errors: string[] }}
+ */
+export function validateRecoveryProposal(proposal, activeTrip = null, currentFormInputs = null) {
+  const errors = [];
+
+  if (!proposal || typeof proposal !== 'object') {
+    return { isValid: false, errors: ['Proposal must be a valid non-null object.'] };
+  }
+
+  if (!proposal.proposalId || typeof proposal.proposalId !== 'string') {
+    errors.push('Proposal is missing a valid proposalId string.');
+  }
+
+  if (proposal.status !== 'pending') {
+    errors.push(`Proposal status is "${proposal.status}". Only pending proposals can be approved or evaluated.`);
+  }
+
+  const proposedPlan = proposal.proposedPlan;
+  if (!proposedPlan || typeof proposedPlan !== 'object') {
+    errors.push('Proposal is missing proposedPlan object.');
+  } else {
+    // Validate inputs
+    const inputs = proposedPlan.inputs;
+    if (!inputs || typeof inputs !== 'object') {
+      errors.push('Proposal proposedPlan is missing inputs.');
+    } else {
+      if (!inputs.origin || typeof inputs.origin !== 'string') errors.push('Proposal proposedPlan inputs missing origin.');
+      if (!inputs.destination || typeof inputs.destination !== 'string') errors.push('Proposal proposedPlan inputs missing destination.');
+      if (!inputs.duration || parseInt(inputs.duration, 10) < 1) errors.push('Proposal proposedPlan inputs duration must be at least 1.');
+      if (inputs.budget === undefined || Number(inputs.budget) <= 0) errors.push('Proposal proposedPlan inputs budget must be greater than 0.');
+      if (!inputs.travellers || parseInt(inputs.travellers, 10) < 1) errors.push('Proposal proposedPlan inputs travellers must be at least 1.');
+    }
+
+    // Validate itinerary with daily schedules
+    const itinerary = proposedPlan.itinerary;
+    if (!itinerary || !Array.isArray(itinerary.days) || itinerary.days.length === 0) {
+      errors.push('Proposal proposedPlan is missing a valid itinerary with daily schedules.');
+    }
+
+    // Validate selected transport & accommodation
+    if (!proposedPlan.selectedTransport || !proposedPlan.selectedTransport.id) {
+      errors.push('Proposal proposedPlan is missing selectedTransport.');
+    }
+    if (!proposedPlan.selectedAccommodation || !proposedPlan.selectedAccommodation.id) {
+      errors.push('Proposal proposedPlan is missing selectedAccommodation.');
+    }
+
+    // Validate budgetBreakdown with total estimated expenses
+    if (!proposedPlan.budgetBreakdown || typeof proposedPlan.budgetBreakdown.totalEstimatedExpenses !== 'number') {
+      errors.push('Proposal proposedPlan is missing budgetBreakdown with totalEstimatedExpenses.');
+    }
+  }
+
+  // Revalidate active trip continuity and staleness if activeTrip provided
+  if (activeTrip) {
+    if (!activeTrip.id || !activeTrip.inputs) {
+      errors.push('Active trip baseline is invalid or missing required inputs.');
+    } else if (isProposalStale(proposal, currentFormInputs, activeTrip)) {
+      errors.push('Proposal is stale: active trip baseline or constraints have changed since proposal generation.');
+    }
+  } else if (currentFormInputs && isProposalStale(proposal, currentFormInputs, null)) {
+    errors.push('Proposal is stale: form inputs have changed since proposal generation.');
+  }
+
+  return {
+    isValid: errors.length === 0,
+    errors
+  };
 }
 
 /**
  * Executes proposal approval: generates a new active trip and recovery audit log.
+ * Revalidates the proposal at approval time to prevent approving stale or invalid proposals.
  * Pure function: returns a new trip and log entry without side effects.
  */
 export function applyProposal(activeTrip, proposal) {
-  if (!proposal || proposal.status !== 'pending') {
-    throw new Error('Only a pending proposal can be approved.');
+  if (!activeTrip || !activeTrip.id || !activeTrip.inputs) {
+    throw new Error('Cannot approve proposal: active trip baseline is required.');
+  }
+
+  const validation = validateRecoveryProposal(proposal, activeTrip);
+  if (!validation.isValid) {
+    throw new Error(`Cannot approve proposal: ${validation.errors.join(' ')}`);
   }
 
   const approvedProposal = {
@@ -375,15 +478,20 @@ export function applyProposal(activeTrip, proposal) {
     simulatedDisruption: proposal.proposedPlan.simulatedDisruption || null
   };
 
+  const costDifference = proposal.costImpact?.costDifference ?? 0;
+
   const auditLogEntry = {
-    id: `log_${Date.now()}`,
+    id: `log_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
     proposalId: proposal.proposalId,
     timestamp: new Date().toISOString(),
     action: 'APPROVED',
-    triggerReasons: proposal.triggerReasons,
+    triggerReasons: Array.isArray(proposal.triggerReasons) ? [...proposal.triggerReasons] : [],
     userReason: proposal.userReason || null,
-    actionsTaken: proposal.actionsTaken,
-    costImpact: proposal.costImpact
+    actionsTaken: Array.isArray(proposal.actionsTaken) ? [...proposal.actionsTaken] : [],
+    costImpact: proposal.costImpact ? {
+      ...proposal.costImpact,
+      difference: costDifference
+    } : null
   };
 
   return {
@@ -398,6 +506,10 @@ export function applyProposal(activeTrip, proposal) {
  * Pure function.
  */
 export function rejectProposal(activeTrip, proposal) {
+  if (!activeTrip || !activeTrip.id) {
+    throw new Error('Cannot reject proposal: active trip baseline is required.');
+  }
+
   if (!proposal || proposal.status !== 'pending') {
     throw new Error('Only a pending proposal can be rejected.');
   }
@@ -408,14 +520,19 @@ export function rejectProposal(activeTrip, proposal) {
     resolvedAt: new Date().toISOString()
   };
 
+  const costDifference = proposal.costImpact?.costDifference ?? 0;
+
   const auditLogEntry = {
-    id: `log_${Date.now()}`,
+    id: `log_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
     proposalId: proposal.proposalId,
     timestamp: new Date().toISOString(),
     action: 'REJECTED',
-    triggerReasons: proposal.triggerReasons,
+    triggerReasons: Array.isArray(proposal.triggerReasons) ? [...proposal.triggerReasons] : [],
     userReason: proposal.userReason || null,
-    costImpact: proposal.costImpact,
+    costImpact: proposal.costImpact ? {
+      ...proposal.costImpact,
+      difference: costDifference
+    } : null,
     note: 'User declined proposed changes. Active itinerary preserved intact.'
   };
 

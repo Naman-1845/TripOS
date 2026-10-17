@@ -367,6 +367,49 @@ describe('TripOS Agent Server & Execution Loop', () => {
       expect(response2.response.output.destination).toBe('Manali');
       expect(response2.response.output.transportOptions).toBeDefined();
     });
+
+    it('runDeterministicAgentLoop correctly changes destination from Manali to Goa', async () => {
+      const result = await runDeterministicAgentLoop({
+        activeTrip: baseTrip,
+        requestedChanges: {
+          destination: 'Goa',
+          budget: 25000,
+          accommodationPreference: 'Luxury'
+        }
+      });
+
+      expect(result.success).toBe(true);
+      expect(result.proposal.proposedPlan.inputs.destination).toBe('Goa');
+      expect(result.proposal.proposedPlan.inputs.budget).toBe(25000);
+      expect(result.proposal.proposedPlan.inputs.origin).toBe('Delhi');
+      expect(result.proposal.proposedPlan.itinerary.days.length).toBe(5);
+      expect(result.proposal.actionsTaken.some(a => a.includes('destination') && a.includes('Goa'))).toBe(true);
+
+      const goaData = getDestinationData('Goa');
+      const goaTransportIds = goaData.transportOptions.map(t => t.id);
+      const goaAccIds = goaData.accommodations.map(a => a.id);
+      expect(goaTransportIds).toContain(result.proposal.proposedPlan.selectedTransport.id);
+      expect(goaAccIds).toContain(result.proposal.proposedPlan.selectedAccommodation.id);
+    });
+
+    it('POST /api/agent/recover handles destination change to Goa and returns valid proposal', async () => {
+      const res = await fetch(`${baseUrl}/api/agent/recover`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          activeTrip: baseTrip,
+          forceFallback: true,
+          requestedChanges: { destination: 'Goa', budget: 25000 }
+        })
+      });
+
+      expect(res.ok).toBe(true);
+      const data = await res.json();
+      expect(data.success).toBe(true);
+      expect(data.proposal.status).toBe('pending');
+      expect(data.proposal.proposedPlan.inputs.destination).toBe('Goa');
+      expect(data.proposal.proposedPlan.inputs.budget).toBe(25000);
+    });
   });
 });
 
