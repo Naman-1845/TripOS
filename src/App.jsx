@@ -8,6 +8,7 @@ import RecoveryModal from './components/RecoveryModal.jsx';
 import DisruptionSimulator from './components/DisruptionSimulator.jsx';
 import SavedTripsDrawer from './components/SavedTripsDrawer.jsx';
 import TripChangeForm from './components/TripChangeForm.jsx';
+import TravelHeroHeader from './components/TravelHeroHeader.jsx';
 
 import { DEMO_SCENARIOS } from './data/defaultScenarios.js';
 import { getDestinationData } from './data/destinationsData.js';
@@ -98,7 +99,8 @@ export default function App() {
       startDate: inputs.startDate,
       duration: inputs.duration,
       interests: inputs.interests,
-      simulatedDisruption: disruption
+      simulatedDisruption: disruption,
+      hotel: accommodation
     });
 
     const budgetBreakdown = calculateBudgetBreakdown({
@@ -392,7 +394,7 @@ export default function App() {
   };
 
   return (
-    <div className="min-h-screen bg-slate-50 text-slate-800 flex flex-col font-sans">
+    <div className="min-h-screen travel-atmosphere text-slate-800 flex flex-col font-sans">
       {/* Toast Notification */}
       {toastMessage && (
         <div className="fixed bottom-5 right-5 z-50 animate-in fade-in slide-in-from-bottom-3 duration-200">
@@ -428,6 +430,15 @@ export default function App() {
 
       {/* Main Content Area */}
       <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-8">
+        {/* Prominent Travel Hero Header */}
+        <TravelHeroHeader
+          activeTrip={activeTrip}
+          destinationDetails={activeTrip?.itinerary?.destinationDetails || getDestinationData(formData.destination)}
+          onQuickDestinationSelect={(dest) => {
+            setFormData(prev => ({ ...prev, destination: dest }));
+          }}
+        />
+
         {/* Live Recovery Agent In-Progress Banner */}
         {isRecovering && (
           <div className="mb-6 p-4 rounded-2xl bg-indigo-900 text-white shadow-xl flex items-center justify-between animate-pulse border border-indigo-700">
@@ -459,9 +470,12 @@ export default function App() {
           onSimulateWeatherDisruption={() => {
             const disruption = {
               outdoorUnsuitable: true,
-              reason: 'Simulated Weather Disruption (Not a Live Weather Report): High-altitude mountain blizzard & avalanche alert.'
+              leadTimeHours: 6,
+              reason: 'Simulated Weather Disruption (Not a Live Weather Report): High-altitude mountain blizzard & avalanche alert.',
+              advanceNotice: 'Advisory notification issued 6 hours before disruption onset. Outdoor activities pre-emptively rerouted.'
             };
             handleTriggerRecovery({ simulatedDisruption: disruption });
+            showToast('🚨 Early Weather Advisory: Notification issued 6 hours before disruption onset. Pre-emptively rerouted!', 'info');
           }}
           onClearDisruptions={() => {
             handleTriggerRecovery({ simulatedDisruption: null });
@@ -513,6 +527,7 @@ export default function App() {
         {activeTrip?.itinerary?.destinationDetails && (
           <Recommendations
             destinationDetails={activeTrip.itinerary.destinationDetails}
+            origin={activeTrip.inputs?.origin || 'Delhi'}
             onSelectTransport={handleSelectTransportPref}
             onSelectAccommodation={handleSelectAccommodationPref}
           />
@@ -552,11 +567,14 @@ export default function App() {
       />
 
       {/* Footer */}
-      <footer className="bg-white border-t border-slate-200 py-6 text-center text-xs text-slate-500">
-        <div className="max-w-7xl mx-auto px-4">
-          <p className="font-semibold text-slate-700">TripOS Functional Travel MVP</p>
-          <p className="mt-1 text-slate-400">
-            Transparent travel planning with mathematical accuracy and autonomous disruption recovery.
+      <footer className="bg-white/70 backdrop-blur-md border-t border-indigo-100/80 py-8 text-center text-xs text-slate-500 relative">
+        <div className="max-w-7xl mx-auto px-4 flex flex-col items-center gap-2">
+          <div className="flex items-center gap-2">
+            <span className="w-2 h-2 rounded-full bg-gradient-to-r from-indigo-500 to-pink-500" />
+            <p className="font-bold text-slate-800 tracking-tight">TripOS — Autonomous AI Travel Planner & Disruption Engine</p>
+          </div>
+          <p className="text-slate-400 max-w-xl">
+            Mathematical budget verification, multi-portal price comparisons, multi-modal day routes, 6-hour advance disruption warnings, and autonomous Gemini recovery.
           </p>
         </div>
       </footer>

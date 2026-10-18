@@ -59,19 +59,26 @@ export default function TripPlannerForm({
   };
 
   return (
-    <div className="bg-white rounded-2xl border border-slate-200/80 shadow-xs p-6 mb-8">
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 mb-6 pb-4 border-b border-slate-100">
-        <div>
-          <h2 className="text-lg font-bold text-slate-900 flex items-center gap-2">
-            <MapPin className="w-5 h-5 text-brand-600" />
-            <span>Trip Parameters & Preferences</span>
-          </h2>
-          <p className="text-xs text-slate-500 mt-0.5">
-            Configure locations, budget, and travel preferences.
-          </p>
+    <div className="travel-glass-card rounded-3xl p-6 sm:p-8 mb-8 relative overflow-hidden transition-all duration-300">
+      {/* Decorative gradient top accent line */}
+      <div className="absolute top-0 left-0 right-0 h-1 bg-gradient-to-r from-indigo-500 via-purple-500 to-pink-500" />
+
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-6 pb-4 border-b border-indigo-100/60">
+        <div className="flex items-center gap-3">
+          <div className="w-10 h-10 rounded-2xl bg-gradient-to-tr from-indigo-600 via-indigo-500 to-purple-600 flex items-center justify-center text-white shadow-md shadow-indigo-500/25 shrink-0">
+            <MapPin className="w-5 h-5" />
+          </div>
+          <div>
+            <h2 className="text-lg font-black text-slate-900 tracking-tight">
+              Trip Parameters & Travel Preferences
+            </h2>
+            <p className="text-xs text-slate-500 mt-0.5">
+              Configure destinations, dates, budgets, and travel style with dynamic planning.
+            </p>
+          </div>
         </div>
         {hasActiveTrip && (
-          <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-semibold bg-emerald-50 text-emerald-700 border border-emerald-200">
+          <span className="inline-flex items-center gap-1.5 px-3.5 py-1 rounded-full text-xs font-bold bg-emerald-500/10 text-emerald-700 border border-emerald-300/60 shadow-2xs shrink-0 self-start sm:self-auto">
             <span className="w-2 h-2 rounded-full bg-emerald-500 animate-ping" />
             Active Trip Loaded
           </span>
@@ -86,15 +93,15 @@ export default function TripPlannerForm({
               Origin City
             </label>
             <div className="relative">
-              <MapPin className="w-4 h-4 text-slate-400 absolute left-3 top-3" />
+              <MapPin className="w-4 h-4 text-slate-400 absolute left-3 top-3.5" />
               <input
                 type="text"
                 value={formData.origin || ''}
                 onChange={(e) => setFormData({ ...formData, origin: e.target.value })}
                 placeholder="e.g. Delhi, Mumbai, Bengaluru"
-                className={`w-full pl-9 pr-3 py-2 text-sm rounded-xl border ${
-                  errors.origin ? 'border-rose-300 ring-2 ring-rose-100' : 'border-slate-200'
-                } focus:outline-hidden focus:border-brand-500 focus:ring-2 focus:ring-brand-100`}
+                className={`w-full pl-9 pr-3 py-2.5 text-sm rounded-xl border bg-white/90 backdrop-blur-xs transition-all ${
+                  errors.origin ? 'border-rose-300 ring-2 ring-rose-100' : 'border-slate-200/90'
+                } focus:outline-hidden focus:border-indigo-500 focus:ring-4 focus:ring-indigo-100`}
               />
             </div>
             {errors.origin && <p className="text-xs text-rose-500 mt-1 flex items-center gap-1"><AlertCircle className="w-3 h-3" /> {errors.origin}</p>}
@@ -105,31 +112,31 @@ export default function TripPlannerForm({
               Destination (Curated or Any City)
             </label>
             <div className="relative">
-              <MapPin className="w-4 h-4 text-brand-500 absolute left-3 top-3" />
+              <MapPin className="w-4 h-4 text-indigo-600 absolute left-3 top-3.5" />
               <input
                 type="text"
                 value={formData.destination || ''}
                 onChange={(e) => setFormData({ ...formData, destination: e.target.value })}
                 placeholder="e.g. Manali, Goa, Jaipur, or any location"
-                className={`w-full pl-9 pr-3 py-2 text-sm rounded-xl border ${
-                  errors.destination ? 'border-rose-300 ring-2 ring-rose-100' : 'border-slate-200'
-                } focus:outline-hidden focus:border-brand-500 focus:ring-2 focus:ring-brand-100`}
+                className={`w-full pl-9 pr-3 py-2.5 text-sm rounded-xl border bg-white/90 backdrop-blur-xs transition-all ${
+                  errors.destination ? 'border-rose-300 ring-2 ring-rose-100' : 'border-slate-200/90'
+                } focus:outline-hidden focus:border-indigo-500 focus:ring-4 focus:ring-indigo-100`}
               />
             </div>
             {errors.destination && <p className="text-xs text-rose-500 mt-1 flex items-center gap-1"><AlertCircle className="w-3 h-3" /> {errors.destination}</p>}
 
             {/* Quick destination chips */}
-            <div className="flex items-center gap-1.5 mt-2 flex-wrap">
-              <span className="text-[10px] text-slate-400 font-medium">Suggestions:</span>
+            <div className="flex items-center gap-1.5 mt-2.5 flex-wrap">
+              <span className="text-[10px] text-slate-400 font-bold uppercase tracking-wider">Top Picks:</span>
               {POPULAR_DESTINATIONS.map((dest) => (
                 <button
                   key={dest}
                   type="button"
                   onClick={() => setFormData({ ...formData, destination: dest })}
-                  className={`text-[11px] px-2 py-0.5 rounded-md border transition-colors cursor-pointer ${
+                  className={`text-[11px] px-2.5 py-0.5 rounded-lg border transition-all duration-150 cursor-pointer hover:scale-105 active:scale-95 ${
                     formData.destination?.toLowerCase() === dest.toLowerCase()
-                      ? 'bg-brand-50 border-brand-300 text-brand-700 font-semibold'
-                      : 'bg-slate-50 border-slate-200 text-slate-600 hover:bg-slate-100'
+                      ? 'bg-gradient-to-r from-indigo-600 to-purple-600 border-transparent text-white font-bold shadow-xs'
+                      : 'bg-white/80 border-slate-200/90 text-slate-600 hover:bg-indigo-50 hover:border-indigo-200 hover:text-indigo-700'
                   }`}
                 >
                   {dest}
@@ -146,12 +153,12 @@ export default function TripPlannerForm({
               Start Date
             </label>
             <div className="relative">
-              <Calendar className="w-4 h-4 text-slate-400 absolute left-3 top-3" />
+              <Calendar className="w-4 h-4 text-slate-400 absolute left-3 top-3.5" />
               <input
                 type="date"
                 value={formData.startDate || ''}
                 onChange={(e) => setFormData({ ...formData, startDate: e.target.value })}
-                className="w-full pl-9 pr-3 py-2 text-sm rounded-xl border border-slate-200 focus:outline-hidden focus:border-brand-500 focus:ring-2 focus:ring-brand-100"
+                className="w-full pl-9 pr-3 py-2.5 text-sm rounded-xl border border-slate-200/90 bg-white/90 focus:outline-hidden focus:border-indigo-500 focus:ring-4 focus:ring-indigo-100 transition-all"
               />
             </div>
           </div>
@@ -167,11 +174,11 @@ export default function TripPlannerForm({
                 max="30"
                 value={formData.duration || 1}
                 onChange={(e) => setFormData({ ...formData, duration: Math.max(1, parseInt(e.target.value, 10) || 1) })}
-                className={`w-full px-3 py-2 text-sm rounded-xl border ${
-                  errors.duration ? 'border-rose-300' : 'border-slate-200'
-                } focus:outline-hidden focus:border-brand-500`}
+                className={`w-full px-3 py-2.5 text-sm rounded-xl border bg-white/90 ${
+                  errors.duration ? 'border-rose-300' : 'border-slate-200/90'
+                } focus:outline-hidden focus:border-indigo-500 focus:ring-4 focus:ring-indigo-100 transition-all`}
               />
-              <span className="text-xs font-semibold text-slate-500 whitespace-nowrap">
+              <span className="text-xs font-bold text-indigo-700 bg-indigo-50 px-2 py-1 rounded-lg border border-indigo-100 whitespace-nowrap">
                 {formData.duration > 1 ? `${formData.duration - 1} Nights` : 'Day Trip'}
               </span>
             </div>
@@ -183,16 +190,16 @@ export default function TripPlannerForm({
               Travellers
             </label>
             <div className="relative">
-              <Users className="w-4 h-4 text-slate-400 absolute left-3 top-3" />
+              <Users className="w-4 h-4 text-slate-400 absolute left-3 top-3.5" />
               <input
                 type="number"
                 min="1"
                 max="20"
                 value={formData.travellers || 1}
                 onChange={(e) => setFormData({ ...formData, travellers: Math.max(1, parseInt(e.target.value, 10) || 1) })}
-                className={`w-full pl-9 pr-3 py-2 text-sm rounded-xl border ${
-                  errors.travellers ? 'border-rose-300' : 'border-slate-200'
-                } focus:outline-hidden focus:border-brand-500`}
+                className={`w-full pl-9 pr-3 py-2.5 text-sm rounded-xl border bg-white/90 ${
+                  errors.travellers ? 'border-rose-300' : 'border-slate-200/90'
+                } focus:outline-hidden focus:border-indigo-500 focus:ring-4 focus:ring-indigo-100 transition-all`}
               />
             </div>
             {errors.travellers && <p className="text-xs text-rose-500 mt-1">{errors.travellers}</p>}
@@ -203,7 +210,7 @@ export default function TripPlannerForm({
               Total Budget (₹)
             </label>
             <div className="relative">
-              <IndianRupee className="w-4 h-4 text-emerald-600 absolute left-3 top-3" />
+              <IndianRupee className="w-4 h-4 text-emerald-600 absolute left-3 top-3.5" />
               <input
                 type="number"
                 step="500"
@@ -211,9 +218,9 @@ export default function TripPlannerForm({
                 value={formData.budget || ''}
                 onChange={(e) => setFormData({ ...formData, budget: parseInt(e.target.value, 10) || 0 })}
                 placeholder="20000"
-                className={`w-full pl-9 pr-3 py-2 text-sm font-semibold rounded-xl border ${
-                  errors.budget ? 'border-rose-300 ring-2 ring-rose-100' : 'border-slate-200'
-                } focus:outline-hidden focus:border-brand-500 focus:ring-2 focus:ring-brand-100 text-slate-900`}
+                className={`w-full pl-9 pr-3 py-2.5 text-sm font-bold rounded-xl border bg-white/90 ${
+                  errors.budget ? 'border-rose-300 ring-2 ring-rose-100' : 'border-slate-200/90'
+                } focus:outline-hidden focus:border-indigo-500 focus:ring-4 focus:ring-indigo-100 text-slate-900 transition-all`}
               />
             </div>
             {errors.budget && <p className="text-xs text-rose-500 mt-1">{errors.budget}</p>}
@@ -221,10 +228,10 @@ export default function TripPlannerForm({
         </div>
 
         {/* Row 3: Preferences (Transport & Accommodation) */}
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4 pt-2 border-t border-slate-100">
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4 pt-2 border-t border-indigo-100/60">
           <div>
             <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-2 flex items-center gap-1.5">
-              <Hotel className="w-4 h-4 text-slate-400" /> Accommodation Preference
+              <Hotel className="w-4 h-4 text-purple-600" /> Accommodation Preference
             </label>
             <div className="grid grid-cols-3 gap-2">
               {[
@@ -236,13 +243,13 @@ export default function TripPlannerForm({
                   key={opt.key}
                   type="button"
                   onClick={() => setFormData({ ...formData, accommodationPreference: opt.key })}
-                  className={`p-2.5 rounded-xl border text-left transition-all cursor-pointer ${
+                  className={`p-3 rounded-2xl border text-left transition-all duration-200 hover:-translate-y-0.5 hover:shadow-md cursor-pointer ${
                     formData.accommodationPreference === opt.key
-                      ? 'border-brand-500 bg-brand-50/70 ring-2 ring-brand-100'
-                      : 'border-slate-200 hover:border-slate-300 bg-white'
+                      ? 'border-indigo-500 bg-gradient-to-br from-indigo-50/90 to-purple-50/70 ring-2 ring-indigo-200/80 shadow-xs'
+                      : 'border-slate-200/80 hover:border-indigo-200 bg-white/80'
                   }`}
                 >
-                  <div className={`text-xs font-bold ${formData.accommodationPreference === opt.key ? 'text-brand-700' : 'text-slate-800'}`}>
+                  <div className={`text-xs font-bold ${formData.accommodationPreference === opt.key ? 'text-indigo-700' : 'text-slate-800'}`}>
                     {opt.label}
                   </div>
                   <div className="text-[10px] text-slate-500 mt-0.5">{opt.desc}</div>
@@ -253,7 +260,7 @@ export default function TripPlannerForm({
 
           <div>
             <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-2 flex items-center gap-1.5">
-              <Bus className="w-4 h-4 text-slate-400" /> Transport Preference
+              <Bus className="w-4 h-4 text-indigo-600" /> Transport Preference
             </label>
             <div className="grid grid-cols-4 gap-2">
               {[
@@ -268,14 +275,14 @@ export default function TripPlannerForm({
                     key={opt.key}
                     type="button"
                     onClick={() => setFormData({ ...formData, transportPreference: opt.key })}
-                    className={`p-2 rounded-xl border text-center transition-all cursor-pointer ${
+                    className={`p-2.5 rounded-2xl border text-center transition-all duration-200 hover:-translate-y-0.5 hover:shadow-md cursor-pointer ${
                       formData.transportPreference === opt.key
-                        ? 'border-brand-500 bg-brand-50/70 ring-2 ring-brand-100'
-                        : 'border-slate-200 hover:border-slate-300 bg-white'
+                        ? 'border-indigo-500 bg-gradient-to-br from-indigo-50/90 to-purple-50/70 ring-2 ring-indigo-200/80 shadow-xs'
+                        : 'border-slate-200/80 hover:border-indigo-200 bg-white/80'
                     }`}
                   >
-                    <Icon className={`w-4 h-4 mx-auto mb-1 ${formData.transportPreference === opt.key ? 'text-brand-600' : 'text-slate-500'}`} />
-                    <div className={`text-xs font-bold ${formData.transportPreference === opt.key ? 'text-brand-700' : 'text-slate-700'}`}>
+                    <Icon className={`w-4 h-4 mx-auto mb-1 ${formData.transportPreference === opt.key ? 'text-indigo-600' : 'text-slate-500'}`} />
+                    <div className={`text-xs font-bold ${formData.transportPreference === opt.key ? 'text-indigo-700' : 'text-slate-700'}`}>
                       {opt.label}
                     </div>
                   </button>
@@ -286,9 +293,9 @@ export default function TripPlannerForm({
         </div>
 
         {/* Row 4: Interests Tags */}
-        <div className="pt-2 border-t border-slate-100">
+        <div className="pt-2 border-t border-indigo-100/60">
           <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-2 flex items-center gap-1.5">
-            <Heart className="w-4 h-4 text-slate-400" /> Interests & Activities
+            <Heart className="w-4 h-4 text-rose-500" /> Interests & Activities
           </label>
           <div className="flex flex-wrap gap-2">
             {INTEREST_OPTIONS.map((interest) => {
@@ -298,10 +305,10 @@ export default function TripPlannerForm({
                   key={interest}
                   type="button"
                   onClick={() => toggleInterest(interest)}
-                  className={`px-3 py-1.5 rounded-lg text-xs font-medium border transition-colors cursor-pointer ${
+                  className={`px-3.5 py-1.5 rounded-xl text-xs font-bold border transition-all duration-200 cursor-pointer hover:scale-105 active:scale-95 ${
                     selected
-                      ? 'bg-slate-900 border-slate-900 text-white shadow-xs'
-                      : 'bg-slate-50 border-slate-200 text-slate-700 hover:bg-slate-100'
+                      ? 'bg-gradient-to-r from-indigo-600 via-purple-600 to-indigo-700 border-transparent text-white shadow-md shadow-indigo-500/20'
+                      : 'bg-white/80 border-slate-200/90 text-slate-700 hover:bg-indigo-50 hover:border-indigo-200 hover:text-indigo-700'
                   }`}
                 >
                   {interest}
@@ -313,7 +320,7 @@ export default function TripPlannerForm({
         </div>
 
         {/* Submit Actions */}
-        <div className="pt-4 border-t border-slate-100 flex flex-col sm:flex-row items-center justify-between gap-3">
+        <div className="pt-4 border-t border-indigo-100/60 flex flex-col sm:flex-row items-center justify-between gap-3">
           <div className="text-xs text-slate-500">
             {hasActiveTrip ? (
               <span>Modifying inputs will trigger the <strong>Travel Recovery Engine</strong> with a side-by-side comparison.</span>
@@ -327,7 +334,7 @@ export default function TripPlannerForm({
               <button
                 type="button"
                 onClick={handleRecoveryClick}
-                className="w-full sm:w-auto px-5 py-2.5 bg-brand-600 hover:bg-brand-700 text-white font-bold text-sm rounded-xl shadow-md shadow-brand-500/20 transition-all flex items-center justify-center gap-2 cursor-pointer"
+                className="w-full sm:w-auto px-6 py-3 bg-gradient-to-r from-indigo-600 via-purple-600 to-indigo-700 hover:from-indigo-500 hover:to-purple-600 text-white font-bold text-sm rounded-2xl shadow-lg shadow-indigo-500/25 hover:shadow-xl hover:shadow-indigo-500/35 hover:-translate-y-0.5 active:translate-y-0 active:scale-[0.98] transition-all flex items-center justify-center gap-2 cursor-pointer"
               >
                 <Sparkles className="w-4 h-4" />
                 <span>Evaluate Recovery Proposal</span>
@@ -335,7 +342,7 @@ export default function TripPlannerForm({
             ) : (
               <button
                 type="submit"
-                className="w-full sm:w-auto px-6 py-2.5 bg-brand-600 hover:bg-brand-700 text-white font-bold text-sm rounded-xl shadow-md shadow-brand-500/20 transition-all flex items-center justify-center gap-2 cursor-pointer"
+                className="w-full sm:w-auto px-7 py-3 bg-gradient-to-r from-indigo-600 via-purple-600 to-indigo-700 hover:from-indigo-500 hover:to-purple-600 text-white font-bold text-sm rounded-2xl shadow-lg shadow-indigo-500/25 hover:shadow-xl hover:shadow-indigo-500/35 hover:-translate-y-0.5 active:translate-y-0 active:scale-[0.98] transition-all flex items-center justify-center gap-2 cursor-pointer"
               >
                 <Sparkles className="w-4 h-4" />
                 <span>Generate Travel Plan</span>

@@ -61,13 +61,13 @@ export default function RecoveryModal({
         {/* Header */}
         <div className="p-6 bg-slate-900 text-white flex items-center justify-between">
           <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-xl bg-brand-500 flex items-center justify-center text-white shadow-lg shadow-brand-500/30">
+            <div className="w-10 h-10 rounded-2xl bg-gradient-to-tr from-indigo-500 via-indigo-600 to-purple-600 flex items-center justify-center text-white shadow-lg shadow-indigo-500/30 shrink-0">
               <Sparkles className="w-5 h-5" />
             </div>
             <div>
               <div className="flex flex-wrap items-center gap-2">
-                <h3 className="text-lg font-bold">Autonomous Travel Recovery Engine</h3>
-                <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-brand-400 text-slate-950 uppercase">
+                <h3 className="text-lg font-black tracking-tight">Autonomous Travel Recovery Engine</h3>
+                <span className="px-2.5 py-0.5 rounded-full text-[10px] font-extrabold bg-gradient-to-r from-indigo-400 to-purple-400 text-slate-950 uppercase shadow-2xs">
                   Proposed Solution
                 </span>
                 {proposal.executionMode === 'live-llm-agent' ? (
@@ -357,10 +357,10 @@ export default function RecoveryModal({
             <button
               onClick={onReject}
               disabled={isApproving || isRejecting}
-              className={`w-full sm:w-auto px-5 py-2.5 rounded-xl border border-slate-300 font-bold text-xs transition-colors flex items-center justify-center gap-1.5 ${
+              className={`w-full sm:w-auto px-5 py-2.5 rounded-xl border border-slate-300 font-bold text-xs transition-all flex items-center justify-center gap-1.5 ${
                 isApproving || isRejecting
                   ? 'bg-slate-100 text-slate-400 cursor-not-allowed'
-                  : 'bg-white text-slate-700 hover:bg-slate-100 hover:text-slate-900 cursor-pointer'
+                  : 'bg-white text-slate-700 hover:bg-slate-100 hover:text-slate-900 cursor-pointer hover:scale-105 active:scale-95 shadow-2xs'
               }`}
             >
               <X className="w-4 h-4 text-slate-500" />
@@ -373,7 +373,7 @@ export default function RecoveryModal({
               className={`w-full sm:w-auto px-6 py-2.5 rounded-xl text-white font-bold text-xs shadow-md transition-all flex items-center justify-center gap-1.5 ${
                 isApproveDisabled
                   ? 'bg-slate-400 cursor-not-allowed opacity-60'
-                  : 'bg-emerald-600 hover:bg-emerald-700 shadow-emerald-600/20 cursor-pointer'
+                  : 'bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 shadow-emerald-600/25 cursor-pointer hover:scale-105 active:scale-95 hover:shadow-lg'
               }`}
             >
               <Check className="w-4 h-4" />

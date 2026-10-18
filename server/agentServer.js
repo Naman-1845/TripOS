@@ -286,6 +286,13 @@ export async function runDeterministicAgentLoop({ activeTrip, requestedChanges =
  * Executes true function calling: the LLM calls registered tools and inspects real outputs.
  */
 export async function runLlmAgentLoop({ activeTrip, requestedChanges = {}, simulatedDisruption = null, apiKey, modelName, aiClient = null }) {
+  if (getQuotaCooldownStatus().isQuotaExceeded) {
+    const quotaErr = new Error('RESOURCE_EXHAUSTED: Gemini API quota is currently in cooldown.');
+    quotaErr.status = 429;
+    quotaErr.code = 'RESOURCE_EXHAUSTED';
+    throw quotaErr;
+  }
+
   const modelToUse = modelName || process.env.GEMINI_MODEL || DEFAULT_GEMINI_MODEL;
   const ai = aiClient || new GoogleGenAI({ apiKey });
 
@@ -327,14 +334,22 @@ Please inspect the trip, search options, verify costs with calculate_trip_budget
   while (iterations < MAX_TOOL_ITERATIONS) {
     iterations++;
 
-    const response = await ai.models.generateContent({
-      model: modelToUse,
-      contents,
-      config: {
-        systemInstruction,
-        tools: [{ functionDeclarations }]
+    let response;
+    try {
+      response = await ai.models.generateContent({
+        model: modelToUse,
+        contents,
+        config: {
+          systemInstruction,
+          tools: [{ functionDeclarations }]
+        }
+      });
+    } catch (err) {
+      if (isGeminiQuotaExceededError(err)) {
+        setQuotaCooldown();
       }
-    });
+      throw err;
+    }
 
     const candidate = response.candidates?.[0];
     if (!candidate) break;
@@ -438,53 +453,110 @@ let quotaExceededUntil = 0;
 const DEFAULT_QUOTA_COOLDOWN_MS = 60 * 1000; // 60-second cooldown
 
 /**
+ * Strips API keys, bearer tokens, and secrets from logs and error strings.
+ */
+export function sanitizeSecrets(text) {
+  if (!text) return '';
+  let str = typeof text === 'string' ? text : String(text);
+  if (process.env.GEMINI_API_KEY && process.env.GEMINI_API_KEY.trim()) {
+    str = str.split(process.env.GEMINI_API_KEY.trim()).join('[REDACTED_API_KEY]');
+  }
+  return str
+    .replace(/AIza[0-9A-Za-z\-_]{30,45}/g, '[REDACTED_API_KEY]')
+    .replace(/(?:key|apiKey|token|secret|authorization)=(?!\[REDACTED)([^\s&"'`]+)/gi, 'key=REDACTED')
+    .replace(/Bearer\s+[A-Za-z0-9\-._~+/]+=*/gi, 'Bearer REDACTED');
+}
+
+/**
  * Detects whether an error from Gemini API is a quota-exceeded / rate-limit error (HTTP 429 RESOURCE_EXHAUSTED).
- * Inspects status codes, error codes, and standard Gemini error message patterns.
+ * Inspects status codes, error codes, response structures, and standard Gemini error message patterns.
  */
 export function isGeminiQuotaExceededError(err) {
   if (!err) return false;
 
   // 1. Direct status or code property (429 or 'RESOURCE_EXHAUSTED')
-  if (err.status === 429 || err.statusCode === 429 || err.code === 429) {
+  if (
+    err.status === 429 ||
+    err.statusCode === 429 ||
+    err.code === 429 ||
+    err.httpStatus === 429 ||
+    err.status === '429' ||
+    err.statusCode === '429' ||
+    err.code === '429'
+  ) {
     return true;
   }
-  const statusStr = String(err.status || err.code || '').toUpperCase();
+
+  const statusStr = String(err.status || err.code || err.statusCode || '').toUpperCase();
   if (statusStr === 'RESOURCE_EXHAUSTED' || statusStr.includes('RESOURCE_EXHAUSTED')) {
     return true;
   }
 
-  // 2. Nested error objects (e.g. GoogleGenAI / gRPC / Axios responses)
-  if (err.error && typeof err.error === 'object') {
-    if (err.error.code === 429 || err.error.status === 429) return true;
-    const nestedStatus = String(err.error.status || '').toUpperCase();
-    if (nestedStatus.includes('RESOURCE_EXHAUSTED')) return true;
-    const nestedMsg = String(err.error.message || '').toUpperCase();
+  // 2. HTTP response object (fetch / axios / genai response)
+  if (err.response && typeof err.response === 'object') {
     if (
-      nestedMsg.includes('429') ||
-      nestedMsg.includes('RESOURCE_EXHAUSTED') ||
-      nestedMsg.includes('QUOTA') ||
-      nestedMsg.includes('RATE LIMIT')
+      err.response.status === 429 ||
+      err.response.statusCode === 429 ||
+      err.response.status === '429' ||
+      err.response.statusCode === '429'
     ) {
       return true;
     }
+    const respStatusText = String(err.response.statusText || '').toUpperCase();
+    if (respStatusText.includes('TOO MANY REQUESTS') || respStatusText.includes('RESOURCE_EXHAUSTED')) {
+      return true;
+    }
+    if (err.response.data && typeof err.response.data === 'object') {
+      if (isGeminiQuotaExceededError(err.response.data)) return true;
+    }
   }
 
-  // 3. Error message strings
-  const msg = String(err.message || '').toUpperCase();
+  // 3. Google API errorDetails array (ErrorInfo with RATE_LIMIT_EXHAUSTED or QUOTA_EXCEEDED)
+  if (Array.isArray(err.errorDetails)) {
+    for (const detail of err.errorDetails) {
+      if (typeof detail === 'object' && detail !== null) {
+        const reason = String(detail.reason || detail.metadata?.quota_limit || '').toUpperCase();
+        if (
+          reason.includes('RESOURCE_EXHAUSTED') ||
+          reason.includes('RATE_LIMIT') ||
+          reason.includes('QUOTA')
+        ) {
+          return true;
+        }
+      }
+    }
+  }
+
+  // 4. Nested error objects (e.g. GoogleGenAI / gRPC / Axios responses)
+  if (err.error && typeof err.error === 'object') {
+    if (isGeminiQuotaExceededError(err.error)) return true;
+  }
+
+  // 5. Error message strings or details
+  const msg = (String(err.message || '') + ' ' + String(err.details || '') + ' ' + String(err)).toUpperCase();
   if (
     msg.includes('429') ||
     msg.includes('RESOURCE_EXHAUSTED') ||
+    msg.includes('RESOURCE EXHAUSTED') ||
     msg.includes('QUOTA') ||
-    msg.includes('RATE LIMIT')
+    msg.includes('RATE LIMIT') ||
+    msg.includes('RATE_LIMIT') ||
+    msg.includes('TOO MANY REQUESTS')
   ) {
     return true;
+  }
+
+  // 6. Cause property (Node.js 18+ Error.cause)
+  if (err.cause && typeof err.cause === 'object') {
+    if (isGeminiQuotaExceededError(err.cause)) return true;
   }
 
   return false;
 }
 
 export function setQuotaCooldown(ms = DEFAULT_QUOTA_COOLDOWN_MS) {
-  quotaExceededUntil = Date.now() + ms;
+  const duration = typeof ms === 'number' && ms > 0 ? ms : DEFAULT_QUOTA_COOLDOWN_MS;
+  quotaExceededUntil = Date.now() + duration;
 }
 
 export function resetQuotaCooldown() {
@@ -495,12 +567,13 @@ export function getQuotaCooldownStatus() {
   const isCooldown = Date.now() < quotaExceededUntil;
   return {
     isQuotaExceeded: isCooldown,
-    cooldownRemainingMs: isCooldown ? Math.max(0, quotaExceededUntil - Date.now()) : 0
+    cooldownRemainingMs: isCooldown ? Math.max(0, quotaExceededUntil - Date.now()) : 0,
+    quotaExceededUntil
   };
 }
 
 // -------------------------------------------------------------------------
-// HTTP Endpoints
+// HTTP Endpoints & Handlers
 // -------------------------------------------------------------------------
 
 /**
@@ -531,11 +604,11 @@ app.get('/api/agent/status', (req, res) => {
 });
 
 /**
- * POST /api/agent/recover
+ * Core Request Handler for POST /api/agent/recover
  * Receives trip recovery request, runs genuine tool loop or deterministic fallback.
  * Gracefully intercepts Gemini HTTP 429 quota errors and immediately uses the deterministic runner.
  */
-app.post('/api/agent/recover', async (req, res) => {
+export async function handleRecoverRequest(req, res) {
   try {
     const { activeTrip, requestedChanges = {}, simulatedDisruption = null } = req.body || {};
 
@@ -547,7 +620,7 @@ app.post('/api/agent/recover', async (req, res) => {
     }
 
     const forceFallback = Boolean(req.body && req.body.forceFallback);
-    const customAiClient = req.app?.locals?.aiClient || null;
+    const customAiClient = req.app?.locals?.aiClient || req.body?.mockAiClient || null;
     const apiKey = !forceFallback && (customAiClient || (process.env.GEMINI_API_KEY && process.env.GEMINI_API_KEY.trim()))
       ? (process.env.GEMINI_API_KEY ? process.env.GEMINI_API_KEY.trim() : 'mock-key')
       : null;
@@ -591,7 +664,7 @@ app.post('/api/agent/recover', async (req, res) => {
           console.warn('[TripOS Agent Server] Gemini API quota exceeded (HTTP 429 RESOURCE_EXHAUSTED). Entering cooldown, immediately using deterministic runner.');
         } else {
           // Safe logging for other failures: never print or expose API keys
-          const safeMessage = (err.message || 'Unknown error').replace(/key=[^&\s]+/gi, 'key=REDACTED');
+          const safeMessage = sanitizeSecrets(err.message || 'Unknown error');
           console.warn('[TripOS Agent Server] Live LLM execution failed, falling back to deterministic runner:', safeMessage);
         }
 
@@ -624,17 +697,22 @@ app.post('/api/agent/recover', async (req, res) => {
     return res.json(fallbackResult);
   } catch (err) {
     // Safe error logging: ensure no keys leaked
-    const safeError = (err.message || 'Internal agent recovery error').replace(/key=[^&\s]+/gi, 'key=REDACTED');
+    const safeError = sanitizeSecrets(err.message || 'Internal agent recovery error');
     console.error('[TripOS Agent Server] Recovery request error:', safeError);
     return res.status(500).json({
       success: false,
       error: safeError
     });
   }
-});
+}
+
+/**
+ * POST /api/agent/recover
+ */
+app.post('/api/agent/recover', handleRecoverRequest);
 
 // Self-starting logic when run directly (e.g. "node server/agentServer.js")
-const isDirectRun = process.argv[1] && (process.argv[1].endsWith('agentServer.js') || process.argv[1].includes('agentServer'));
+const isDirectRun = process.argv[1] && process.argv[1].endsWith('agentServer.js') && !process.argv[1].includes('.test.');
 if (isDirectRun && process.env.NODE_ENV !== 'test') {
   const port = process.env.AGENT_PORT || 3001;
   app.listen(port, () => {

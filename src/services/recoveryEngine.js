@@ -98,7 +98,7 @@ export function generateRecoveryProposal(activeTrip, proposedChanges = {}) {
   const disruptionActive = Boolean(next.simulatedDisruption?.outdoorUnsuitable);
   const wasDisrupted = Boolean(activeTrip.simulatedDisruption?.outdoorUnsuitable);
   if (disruptionActive && !wasDisrupted) {
-    triggerReasons.push(`Adverse condition detected: "${next.simulatedDisruption.reason || 'Outdoor activities unsuitable'}"`);
+    triggerReasons.push(`Adverse condition detected: "${next.simulatedDisruption.reason || 'Outdoor activities unsuitable'}" (Early notification 6h advance notice before disruption onset)`);
   } else if (!disruptionActive && wasDisrupted) {
     triggerReasons.push(`Adverse condition cleared: Outdoor activities restored`);
   }
@@ -189,7 +189,7 @@ export function generateRecoveryProposal(activeTrip, proposedChanges = {}) {
 
   // Handle Disruption replacements
   if (disruptionActive) {
-    actionsTaken.push(`Substituted outdoor excursions with sheltered cultural monasteries, indoor art museums, and thermal springs.`);
+    actionsTaken.push(`Substituted outdoor excursions with sheltered cultural monasteries, indoor art museums, and thermal springs (Pre-emptively notified 6 hours in advance).`);
   }
 
   if (actionsTaken.length === 0) {
@@ -203,7 +203,8 @@ export function generateRecoveryProposal(activeTrip, proposedChanges = {}) {
     startDate: next.startDate,
     duration: next.duration,
     interests: next.interests,
-    simulatedDisruption: next.simulatedDisruption
+    simulatedDisruption: next.simulatedDisruption,
+    hotel: chosenAccommodation
   });
 
   const proposedBudgetBreakdown = calculateBudgetBreakdown({
@@ -215,7 +216,8 @@ export function generateRecoveryProposal(activeTrip, proposedChanges = {}) {
     plannedActivities: proposedItinerary.allPlannedActivities
   });
 
-  const costDifference = proposedBudgetBreakdown.totalEstimatedExpenses - activeTrip.budgetBreakdown.totalEstimatedExpenses;
+  const oldTotal = activeTrip.budgetBreakdown?.totalEstimatedExpenses || 0;
+  const costDifference = proposedBudgetBreakdown.totalEstimatedExpenses - oldTotal;
 
   if (proposedBudgetBreakdown.isOverBudget) {
     actionsTaken.push(`Note: Total expenses of ₹${proposedBudgetBreakdown.totalEstimatedExpenses.toLocaleString('en-IN')} exceed the reduced budget of ₹${next.budget.toLocaleString('en-IN')} by ₹${proposedBudgetBreakdown.deficit.toLocaleString('en-IN')}. Consider shortening trip duration.`);

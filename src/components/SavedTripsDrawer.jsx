@@ -25,14 +25,14 @@ export default function SavedTripsDrawer({
     <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-xs flex justify-end">
       <div className="bg-white w-full max-w-md h-full shadow-2xl flex flex-col animate-in slide-in-from-right duration-200">
         {/* Header */}
-        <div className="p-4 border-b border-slate-200 flex items-center justify-between">
+        <div className="p-4 border-b border-indigo-100/80 flex items-center justify-between bg-slate-50/60">
           <div className="flex gap-2">
             <button
               onClick={() => setTab('saved')}
-              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold transition-colors cursor-pointer ${
+              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer hover:scale-105 active:scale-95 ${
                 tab === 'saved'
-                  ? 'bg-brand-50 text-brand-700 border border-brand-200'
-                  : 'text-slate-600 hover:bg-slate-100'
+                  ? 'bg-gradient-to-r from-indigo-600 to-purple-600 text-white shadow-xs'
+                  : 'text-slate-600 hover:bg-white bg-slate-100'
               }`}
             >
               <Bookmark className="w-3.5 h-3.5" />
@@ -41,10 +41,10 @@ export default function SavedTripsDrawer({
 
             <button
               onClick={() => setTab('history')}
-              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold transition-colors cursor-pointer ${
+              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer hover:scale-105 active:scale-95 ${
                 tab === 'history'
-                  ? 'bg-brand-50 text-brand-700 border border-brand-200'
-                  : 'text-slate-600 hover:bg-slate-100'
+                  ? 'bg-gradient-to-r from-indigo-600 to-purple-600 text-white shadow-xs'
+                  : 'text-slate-600 hover:bg-white bg-slate-100'
               }`}
             >
               <History className="w-3.5 h-3.5" />
@@ -54,7 +54,7 @@ export default function SavedTripsDrawer({
 
           <button
             onClick={onClose}
-            className="p-1.5 text-slate-400 hover:text-slate-700 rounded-lg hover:bg-slate-100 transition-colors cursor-pointer"
+            className="p-1.5 text-slate-400 hover:text-slate-700 rounded-xl hover:bg-slate-200 transition-colors cursor-pointer"
           >
             <X className="w-5 h-5" />
           </button>
@@ -65,8 +65,8 @@ export default function SavedTripsDrawer({
           {tab === 'saved' ? (
             savedTrips.length === 0 ? (
               <div className="text-center py-12 text-slate-400">
-                <Bookmark className="w-10 h-10 mx-auto mb-2 stroke-1" />
-                <p className="text-sm font-semibold text-slate-600">No saved trips yet</p>
+                <Bookmark className="w-10 h-10 mx-auto mb-2 stroke-1 text-slate-300" />
+                <p className="text-sm font-bold text-slate-600">No saved trips yet</p>
                 <p className="text-xs text-slate-400 mt-1">
                   Trips you generate or modify are saved automatically to LocalStorage.
                 </p>
@@ -77,18 +77,18 @@ export default function SavedTripsDrawer({
                 return (
                   <div
                     key={trip.id}
-                    className={`p-4 rounded-xl border transition-all ${
+                    className={`p-4 rounded-2xl border transition-all duration-200 hover-lift shadow-2xs ${
                       isActive
-                        ? 'border-brand-500 bg-brand-50/20 ring-2 ring-brand-100'
-                        : 'border-slate-200 bg-white hover:border-slate-300'
+                        ? 'border-indigo-400 bg-gradient-to-r from-indigo-50/80 to-purple-50/50 ring-2 ring-indigo-200'
+                        : 'border-slate-200/90 bg-white hover:border-indigo-200'
                     }`}
                   >
                     <div className="flex items-start justify-between gap-2 mb-2">
                       <div>
                         <div className="flex items-center gap-1.5">
-                          <h4 className="text-sm font-bold text-slate-900">{trip.name}</h4>
+                          <h4 className="text-sm font-extrabold text-slate-900">{trip.name}</h4>
                           {isActive && (
-                            <span className="text-[10px] font-bold px-1.5 py-0.2 bg-brand-600 text-white rounded-md">
+                            <span className="text-[10px] font-bold px-2 py-0.5 bg-indigo-600 text-white rounded-md shadow-2xs">
                               Active
                             </span>
                           )}
@@ -100,7 +100,7 @@ export default function SavedTripsDrawer({
 
                       <button
                         onClick={() => onDeleteTrip(trip.id)}
-                        className="text-slate-400 hover:text-rose-600 p-1 rounded-md transition-colors cursor-pointer"
+                        className="text-slate-400 hover:text-rose-600 p-1.5 rounded-lg transition-colors cursor-pointer hover:bg-rose-50"
                         title="Delete Trip"
                       >
                         <Trash2 className="w-4 h-4" />

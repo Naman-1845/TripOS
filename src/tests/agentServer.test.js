@@ -1,8 +1,18 @@
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import { app, runDeterministicAgentLoop, runLlmAgentLoop } from '../../server/agentServer.js';
+import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
+import {
+  app,
+  runDeterministicAgentLoop,
+  runLlmAgentLoop,
+  isGeminiQuotaExceededError,
+  sanitizeSecrets,
+  setQuotaCooldown,
+  resetQuotaCooldown,
+  getQuotaCooldownStatus
+} from '../../server/agentServer.js';
 import { getDestinationData } from '../data/destinationsData.js';
 import { generateItinerary } from '../services/itineraryEngine.js';
 import { calculateBudgetBreakdown } from '../services/budgetEngine.js';
+import { validateRecoveryProposal } from '../services/recoveryEngine.js';
 
 describe('TripOS Agent Server & Execution Loop', () => {
   let server;
@@ -51,6 +61,11 @@ describe('TripOS Agent Server & Execution Loop', () => {
     if (server) {
       await new Promise((resolve) => server.close(resolve));
     }
+  });
+
+  beforeEach(() => {
+    resetQuotaCooldown();
+    if (app.locals) delete app.locals.aiClient;
   });
 
   // 1. GET /api/agent/status & API Key Secrecy
@@ -209,6 +224,169 @@ describe('TripOS Agent Server & Execution Loop', () => {
       expect(result.success).toBe(true);
       expect(result.mode).toBe('deterministic-fallback');
       expect(result.proposal.proposedPlan.inputs.budget).toBe(16000);
+    });
+
+    describe('Gemini Quota Error Detection (isGeminiQuotaExceededError)', () => {
+      it('detects HTTP 429 and RESOURCE_EXHAUSTED across standard error formats', () => {
+        expect(isGeminiQuotaExceededError({ status: 429 })).toBe(true);
+        expect(isGeminiQuotaExceededError({ statusCode: 429 })).toBe(true);
+        expect(isGeminiQuotaExceededError({ code: 429 })).toBe(true);
+        expect(isGeminiQuotaExceededError({ code: 'RESOURCE_EXHAUSTED' })).toBe(true);
+        expect(isGeminiQuotaExceededError({ status: 'RESOURCE_EXHAUSTED' })).toBe(true);
+        expect(isGeminiQuotaExceededError({ response: { status: 429 } })).toBe(true);
+        expect(isGeminiQuotaExceededError({ response: { statusText: 'Too Many Requests' } })).toBe(true);
+        expect(isGeminiQuotaExceededError({
+          errorDetails: [{ reason: 'RATE_LIMIT_EXHAUSTED' }]
+        })).toBe(true);
+        expect(isGeminiQuotaExceededError({
+          error: { code: 429, message: 'Resource has been exhausted' }
+        })).toBe(true);
+        expect(isGeminiQuotaExceededError(new Error('Quota exceeded for quota metric Generate Content API requests'))).toBe(true);
+        expect(isGeminiQuotaExceededError(new Error('[429 Resource Exhausted] Rate limit exceeded'))).toBe(true);
+        expect(isGeminiQuotaExceededError({
+          cause: { status: 429, message: 'Too Many Requests' }
+        })).toBe(true);
+      });
+
+      it('returns false for non-quota errors (500, network error, 400)', () => {
+        expect(isGeminiQuotaExceededError(null)).toBe(false);
+        expect(isGeminiQuotaExceededError(undefined)).toBe(false);
+        expect(isGeminiQuotaExceededError({ status: 500, message: 'Internal Server Error' })).toBe(false);
+        expect(isGeminiQuotaExceededError(new Error('Network connection refused'))).toBe(false);
+        expect(isGeminiQuotaExceededError(new Error('Invalid argument: destination must not be empty'))).toBe(false);
+      });
+    });
+
+    describe('Secret Sanitization (sanitizeSecrets)', () => {
+      it('redacts Google API keys and bearer tokens from logs and error text', () => {
+        const sensitive = 'Error: request failed with key=AIzaSyA1234567890123456789012345678901 and Bearer ya29.a0AfH6SM...';
+        const sanitized = sanitizeSecrets(sensitive);
+        expect(sanitized).not.toContain('AIzaSyA1234567890123456789012345678901');
+        expect(sanitized).not.toContain('ya29.a0AfH6SM');
+        expect(sanitized).toContain('[REDACTED_API_KEY]');
+        expect(sanitized).toContain('Bearer REDACTED');
+      });
+    });
+
+    describe('POST /api/agent/recover - Quota 429 Handling & Cooldown (Mocked API)', () => {
+      it('immediately falls back to deterministic runner when Gemini quota is exceeded (HTTP 429)', async () => {
+        let callCount = 0;
+        const mockQuotaClient = {
+          models: {
+            generateContent: async () => {
+              callCount++;
+              const quotaErr = new Error('RESOURCE_EXHAUSTED: Quota exceeded for quota metric Generate Content API requests');
+              quotaErr.status = 429;
+              quotaErr.code = 'RESOURCE_EXHAUSTED';
+              throw quotaErr;
+            }
+          }
+        };
+
+        app.locals.aiClient = mockQuotaClient;
+
+        const res = await fetch(`${baseUrl}/api/agent/recover`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            activeTrip: baseTrip,
+            requestedChanges: { budgetDelta: -4000 }
+          })
+        });
+
+        expect(res.status).toBe(200);
+        const data = await res.json();
+
+        expect(data.success).toBe(true);
+        expect(data.mode).toBe('deterministic-fallback-on-error');
+        expect(data.notice).toContain('429');
+        expect(data.agentSummary).toContain('quota exceeded');
+        expect(callCount).toBe(1);
+
+        // Verify valid proposal structure and invariants
+        expect(data.proposal.status).toBe('pending');
+        expect(data.proposal.proposedPlan.inputs.budget).toBe(16000);
+        const validation = validateRecoveryProposal(data.proposal, baseTrip);
+        expect(validation.isValid).toBe(true);
+
+        // Verify quota cooldown is now active
+        const cooldownStatus = getQuotaCooldownStatus();
+        expect(cooldownStatus.isQuotaExceeded).toBe(true);
+        expect(cooldownStatus.cooldownRemainingMs).toBeGreaterThan(0);
+      });
+
+      it('avoids repeatedly retrying failed requests when quota cooldown is active', async () => {
+        let callCount = 0;
+        const mockClient = {
+          models: {
+            generateContent: async () => {
+              callCount++;
+              throw new Error('Should not be called during cooldown');
+            }
+          }
+        };
+
+        app.locals.aiClient = mockClient;
+
+        // Set cooldown explicitly
+        setQuotaCooldown(30000);
+
+        const res = await fetch(`${baseUrl}/api/agent/recover`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            activeTrip: baseTrip,
+            requestedChanges: { durationDelta: -1 }
+          })
+        });
+
+        expect(res.status).toBe(200);
+        const data = await res.json();
+
+        // Must NOT have called the mock LLM client at all
+        expect(callCount).toBe(0);
+        expect(data.success).toBe(true);
+        expect(data.mode).toBe('deterministic-fallback-on-error');
+        expect(data.notice).toContain('cooldown');
+        expect(data.proposal.proposedPlan.inputs.duration).toBe(4);
+      });
+
+      it('preserves fallback behavior for non-quota errors without activating quota cooldown', async () => {
+        let callCount = 0;
+        const mockGenericErrorClient = {
+          models: {
+            generateContent: async () => {
+              callCount++;
+              const genericErr = new Error('500 Internal Server Error from upstream Gemini service');
+              genericErr.status = 500;
+              throw genericErr;
+            }
+          }
+        };
+
+        app.locals.aiClient = mockGenericErrorClient;
+
+        const res = await fetch(`${baseUrl}/api/agent/recover`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            activeTrip: baseTrip,
+            requestedChanges: { budgetDelta: -2000 }
+          })
+        });
+
+        expect(res.status).toBe(200);
+        const data = await res.json();
+
+        expect(data.success).toBe(true);
+        expect(data.mode).toBe('deterministic-fallback-on-error');
+        expect(data.notice).toContain('Live LLM provider encountered an error');
+        expect(callCount).toBe(1);
+
+        // Crucial: quota cooldown must NOT be activated for generic non-quota errors
+        const cooldownStatus = getQuotaCooldownStatus();
+        expect(cooldownStatus.isQuotaExceeded).toBe(false);
+      });
     });
   });
 

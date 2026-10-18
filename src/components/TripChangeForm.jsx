@@ -71,47 +71,52 @@ export default function TripChangeForm({
   };
 
   return (
-    <div className="bg-white rounded-2xl border border-indigo-100 shadow-sm p-6 mb-8 ring-1 ring-indigo-500/10">
+    <div className="travel-glass-card rounded-3xl p-6 sm:p-8 mb-8 relative overflow-hidden transition-all duration-300">
+      {/* Decorative gradient top accent line */}
+      <div className="absolute top-0 left-0 right-0 h-1 bg-gradient-to-r from-blue-500 via-indigo-500 to-purple-500" />
+
       {/* Section Header */}
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 pb-4 mb-5 border-b border-slate-100">
-        <div>
-          <div className="flex items-center gap-2">
-            <span className="p-1.5 rounded-lg bg-indigo-50 text-indigo-600">
-              <Sliders className="w-4 h-4" />
-            </span>
-            <h2 className="text-base font-bold text-slate-900">
-              Update Trip Due to Changes
-            </h2>
-            <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-indigo-50 text-indigo-700 border border-indigo-200">
-              Mid-Trip Changes
-            </span>
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-4 mb-5 border-b border-indigo-100/60">
+        <div className="flex items-center gap-3">
+          <div className="w-10 h-10 rounded-2xl bg-gradient-to-tr from-blue-600 via-indigo-600 to-purple-600 flex items-center justify-center text-white shadow-md shadow-indigo-500/25 shrink-0">
+            <Sliders className="w-5 h-5" />
           </div>
-          <p className="text-xs text-slate-500 mt-1">
-            Report real-world changes that occurred during your trip (duration extended/shortened or budget modified) to generate a revised recovery plan.
-          </p>
+          <div>
+            <div className="flex items-center gap-2">
+              <h2 className="text-lg font-black text-slate-900 tracking-tight">
+                Update Trip Due to Mid-Trip Changes
+              </h2>
+              <span className="px-2.5 py-0.5 rounded-full text-[10px] font-extrabold bg-indigo-50 text-indigo-700 border border-indigo-200">
+                Mid-Trip Mode
+              </span>
+            </div>
+            <p className="text-xs text-slate-500 mt-0.5">
+              Report real-world changes that occurred during your trip (duration or budget deltas) to generate a revised recovery plan.
+            </p>
+          </div>
         </div>
 
         {/* Current Active Trip Baseline Summary */}
-        <div className="flex items-center gap-2 bg-slate-50 px-3 py-1.5 rounded-xl border border-slate-200/80 text-xs shrink-0">
-          <span className="text-slate-500 font-medium">Active Trip:</span>
-          <span className="font-bold text-slate-800">{activeTrip.inputs.destination}</span>
+        <div className="flex items-center gap-2 bg-white/90 px-3.5 py-2 rounded-2xl border border-slate-200/80 text-xs shrink-0 shadow-2xs self-start sm:self-auto">
+          <span className="text-slate-500 font-semibold">Active:</span>
+          <span className="font-extrabold text-slate-800">{activeTrip.inputs.destination}</span>
           <span className="text-slate-300">•</span>
-          <span className="font-bold text-indigo-700">{originalDuration} Days</span>
+          <span className="font-extrabold text-indigo-700">{originalDuration} Days</span>
           <span className="text-slate-300">•</span>
-          <span className="font-bold text-emerald-700">₹{originalBudget.toLocaleString('en-IN')}</span>
+          <span className="font-extrabold text-emerald-700">₹{originalBudget.toLocaleString('en-IN')}</span>
         </div>
       </div>
 
       {/* Specification Examples Quick Chips */}
-      <div className="mb-6 p-3 bg-indigo-50/50 rounded-xl border border-indigo-100 flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-xs">
-        <span className="font-bold text-indigo-900 text-[11px] uppercase tracking-wider">
-          Specification Examples:
+      <div className="mb-6 p-3.5 bg-gradient-to-r from-indigo-50/70 to-purple-50/50 rounded-2xl border border-indigo-100/80 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 text-xs shadow-2xs">
+        <span className="font-extrabold text-indigo-950 text-[11px] uppercase tracking-wider">
+          Quick Preset Scenarios:
         </span>
-        <div className="flex items-center gap-1.5 flex-wrap">
+        <div className="flex items-center gap-2 flex-wrap">
           <button
             type="button"
             onClick={setExampleA}
-            className="px-2.5 py-1 bg-white hover:bg-indigo-100/70 text-indigo-800 font-semibold rounded-lg border border-indigo-200 transition-colors cursor-pointer text-[11px]"
+            className="px-3 py-1 bg-white hover:bg-indigo-50 text-indigo-800 font-bold rounded-xl border border-indigo-200 transition-all cursor-pointer text-[11px] hover:scale-105 active:scale-95 shadow-2xs"
             title="Duration change = +2 days (5d -> 7d)"
           >
             Example A: +2 Days
@@ -119,7 +124,7 @@ export default function TripChangeForm({
           <button
             type="button"
             onClick={setExampleB}
-            className="px-2.5 py-1 bg-white hover:bg-indigo-100/70 text-indigo-800 font-semibold rounded-lg border border-indigo-200 transition-colors cursor-pointer text-[11px]"
+            className="px-3 py-1 bg-white hover:bg-indigo-50 text-indigo-800 font-bold rounded-xl border border-indigo-200 transition-all cursor-pointer text-[11px] hover:scale-105 active:scale-95 shadow-2xs"
             title="Duration change = -2 days (5d -> 3d)"
           >
             Example B: -2 Days
@@ -127,7 +132,7 @@ export default function TripChangeForm({
           <button
             type="button"
             onClick={setExampleC}
-            className="px-2.5 py-1 bg-white hover:bg-indigo-100/70 text-indigo-800 font-semibold rounded-lg border border-indigo-200 transition-colors cursor-pointer text-[11px]"
+            className="px-3 py-1 bg-white hover:bg-indigo-50 text-indigo-800 font-bold rounded-xl border border-indigo-200 transition-all cursor-pointer text-[11px] hover:scale-105 active:scale-95 shadow-2xs"
             title="Budget change = -₹4,000 (₹20k -> ₹16k)"
           >
             Example C: -₹4,000 Budget
@@ -135,7 +140,7 @@ export default function TripChangeForm({
           <button
             type="button"
             onClick={setExampleD}
-            className="px-2.5 py-1 bg-white hover:bg-indigo-100/70 text-indigo-800 font-semibold rounded-lg border border-indigo-200 transition-colors cursor-pointer text-[11px]"
+            className="px-3 py-1 bg-white hover:bg-indigo-50 text-indigo-800 font-bold rounded-xl border border-indigo-200 transition-all cursor-pointer text-[11px] hover:scale-105 active:scale-95 shadow-2xs"
             title="Duration change = +2 days AND Budget change = -₹3,000"
           >
             Example D: +2d & -₹3,000
@@ -144,7 +149,7 @@ export default function TripChangeForm({
             <button
               type="button"
               onClick={handleReset}
-              className="px-2 py-1 text-slate-500 hover:text-rose-600 font-medium rounded-lg text-[11px] flex items-center gap-1 transition-colors cursor-pointer ml-1"
+              className="px-2.5 py-1 text-slate-500 hover:text-rose-600 font-bold rounded-xl text-[11px] flex items-center gap-1 transition-all cursor-pointer ml-1 hover:bg-rose-50"
             >
               <RotateCcw className="w-3 h-3" /> Reset
             </button>
