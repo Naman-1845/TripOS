@@ -10,6 +10,7 @@
 import express from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
+import rateLimit from 'express-rate-limit';
 import { GoogleGenAI } from '@google/genai';
 
 import {
@@ -19,9 +20,13 @@ import {
   inspect_active_trip,
   search_travel_options,
   calculate_trip_budget,
-  draft_recovery_proposal
+  draft_recovery_proposal,
+  verify_proposal
 } from '../src/services/agentTools.js';
-import { calculateTripDeltas } from '../src/services/recoveryEngine.js';
+import { calculateTripDeltas, generateCandidateProposals } from '../src/services/recoveryEngine.js';
+import { parseIntentDeterministic } from '../src/services/intentParser.js';
+import { getDestinationData, registerCustomCatalog, getCachedCatalog, CURATED_DESTINATIONS } from '../src/data/destinationsData.js';
+import { buildRouteTransportOptions, calculateRouteDistanceKm } from '../src/services/distanceService.js';
 
 // Load server-side environment variables (.env is git-ignored)
 dotenv.config();
@@ -37,8 +42,21 @@ app.use(cors({
 
 app.use(express.json({ limit: '1mb' }));
 
-const MAX_TOOL_ITERATIONS = 6;
-const DEFAULT_GEMINI_MODEL = 'gemini-3.8-flash';
+// Basic rate limiting: 10 requests/min per IP on agent endpoints (relaxed in test environment)
+const agentRateLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: process.env.NODE_ENV === 'test' ? 1000 : 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: {
+    success: false,
+    error: 'Too many requests to agent endpoints. Please wait a minute before trying again.'
+  }
+});
+app.use('/api/agent/', agentRateLimiter);
+
+const MAX_TOOL_ITERATIONS = 10;
+const DEFAULT_GEMINI_MODEL = 'gemini-2.5-flash';
 
 /**
  * Deterministic Fallback Agent Runner
@@ -270,12 +288,81 @@ export async function runDeterministicAgentLoop({ activeTrip, requestedChanges =
     }
   });
 
+  // Step 5: Verify candidate parameters deterministically
+  const verifyResult = verify_proposal({
+    destination: targetDestination,
+    duration: targetDuration,
+    budget: targetBudget,
+    selectedTransportId: chosenTransport.id,
+    selectedAccommodationId: chosenAccommodation.id,
+    totalEstimatedExpenses: budgetResult.totalEstimatedExpenses,
+    simulatedDisruption: finalDisruption
+  });
+
+  trace.push({
+    step: step++,
+    thought: 'Deterministically verified proposal parameters against catalog rates, minimum duration, and weather rules.',
+    toolCall: {
+      name: 'verify_proposal',
+      args: {
+        destination: targetDestination,
+        duration: targetDuration,
+        budget: targetBudget,
+        selectedTransportId: chosenTransport.id,
+        selectedAccommodationId: chosenAccommodation.id,
+        totalEstimatedExpenses: budgetResult.totalEstimatedExpenses
+      }
+    },
+    observation: verifyResult
+  });
+
+  // Generate 2-3 candidate strategies
+  const candidateResult = generateCandidateProposals(activeTrip, {
+    ...requestedChanges,
+    destination: targetDestination,
+    origin: targetOrigin,
+    duration: targetDuration,
+    budget: targetBudget,
+    travellers: targetTravellers,
+    simulatedDisruption: finalDisruption,
+    userReason
+  });
+
+  // Determine primary strategy label
+  const primaryStrategy = isDisrupted
+    ? 'Comfort/Indoor-Safe'
+    : (budgetResult.isOverBudget ? 'Budget Saver' : 'Time Saver / Fastest');
+  proposal.strategy = primaryStrategy;
+  proposal.tradeoffs = primaryStrategy === 'Budget Saver'
+    ? ['Lowest verified expenses', 'Economy accommodation', 'High transit efficiency']
+    : (primaryStrategy === 'Comfort/Indoor-Safe'
+      ? [isDisrupted ? '100% sheltered indoor attractions' : 'High comfort lodging', 'Protected from disruptions', 'Higher budget allocation']
+      : ['Fastest transit option', 'More destination hours', 'Standard lodging']);
+
+  // Ensure candidate list has unique strategies and marks proposal recommended
+  const candidates = candidateResult.candidates.map(c => {
+    if (c.proposal.proposedPlan.selectedTransport?.id === chosenTransport.id &&
+        c.proposal.proposedPlan.selectedAccommodation?.id === chosenAccommodation.id) {
+      return {
+        ...c,
+        proposal,
+        recommended: true
+      };
+    }
+    return c;
+  });
+
+  if (!candidates.some(c => c.recommended)) {
+    candidates[0].recommended = true;
+  }
+
   return {
     success: true,
     mode: 'deterministic-fallback',
     provider: 'TripOS Rule-Based Tool Runner',
     model: null,
     proposal,
+    candidates,
     trace,
     agentSummary: explanation
   };
@@ -298,7 +385,7 @@ export async function runLlmAgentLoop({ activeTrip, requestedChanges = {}, simul
 
   const trace = [];
   let step = 1;
-  let finalProposal = null;
+  const draftedProposals = [];
 
   // Format tools for Gemini Function Calling
   const functionDeclarations = AGENT_TOOL_DEFINITIONS.map(tool => ({
@@ -308,22 +395,25 @@ export async function runLlmAgentLoop({ activeTrip, requestedChanges = {}, simul
   }));
 
   const systemInstruction = `You are the TripOS Autonomous Travel Recovery Agent.
-Your job is to inspect the user's active trip, analyze requested changes (duration change, budget change, or weather disruptions), query verified travel options using your tools, calculate exact costs (NEVER guess or fabricate prices; always use calculate_trip_budget), and finally call draft_recovery_proposal.
-You have access to 4 tools:
-1. inspect_active_trip
-2. search_travel_options
-3. calculate_trip_budget
-4. draft_recovery_proposal
+Your job is to inspect the user's active trip, analyze requested changes (duration change, budget change, destination change, or weather disruptions), query verified travel options using search_travel_options, calculate exact costs (NEVER guess or fabricate prices; always use calculate_trip_budget), verify candidate parameters with verify_proposal, and draft recovery proposals.
+
+Strategies to explore:
+You should explore up to 3 distinct recovery strategies:
+1. "Budget Saver": cheapest verified options (e.g. Bus/Train + Hostel) with maximum cost savings.
+2. "Time Saver / Fastest": fastest verified transit options (e.g. Flight or Cab) minimizing transit time.
+3. "Comfort/Indoor-Safe": premium lodging / comfortable transport, and for adverse weather disruptions, strictly indoor/sheltered attractions.
 
 Rules:
 - NEVER invent prices. Only calculate_trip_budget produces verified costs.
-- You must call draft_recovery_proposal before finishing.
+- You can call draft_recovery_proposal once per distinct strategy (up to 3 proposals total).
+- Pass 'strategy' (e.g. "Budget Saver", "Time Saver / Fastest", or "Comfort/Indoor-Safe") and 'tradeoffs' (array of pros and cons) into draft_recovery_proposal.
+- Before completing, call verify_proposal to confirm your proposal constraints.
 - Your proposals are recommendations only; the active trip will NOT be modified until the user approves.`;
 
   const userPrompt = `Active Trip Target: ${activeTrip.inputs.origin} to ${activeTrip.inputs.destination} (${activeTrip.inputs.duration}d, budget ₹${activeTrip.inputs.budget}).
 Requested Changes: ${JSON.stringify(requestedChanges)}.
 Active Disruption: ${JSON.stringify(simulatedDisruption || activeTrip.simulatedDisruption || null)}.
-Please inspect the trip, search options, verify costs with calculate_trip_budget, and draft a recovery proposal.`;
+Please inspect the trip, explore alternative strategy options, verify costs with calculate_trip_budget and verify_proposal, and draft candidate recovery proposals.`;
 
   const contents = [
     { role: 'user', parts: [{ text: userPrompt }] }
@@ -396,7 +486,7 @@ Please inspect the trip, search options, verify costs with calculate_trip_budget
       });
 
       if (call.name === 'draft_recovery_proposal' && !toolOutput.error) {
-        finalProposal = toolOutput;
+        draftedProposals.push(toolOutput);
       }
 
       functionResponseParts.push({
@@ -414,14 +504,14 @@ Please inspect the trip, search options, verify costs with calculate_trip_budget
       parts: functionResponseParts
     });
 
-    // If proposal was drafted, we can conclude
-    if (finalProposal) {
+    // If 3 proposals have been drafted, conclude loop
+    if (draftedProposals.length >= 3) {
       break;
     }
   }
 
   // If the LLM loop did not conclude with draft_recovery_proposal, invoke it deterministically
-  if (!finalProposal) {
+  if (draftedProposals.length === 0) {
     const fallbackRun = await runDeterministicAgentLoop({ activeTrip, requestedChanges, simulatedDisruption });
     return {
       success: true,
@@ -429,19 +519,51 @@ Please inspect the trip, search options, verify costs with calculate_trip_budget
       provider: `Google Gemini (${modelToUse})`,
       model: modelToUse,
       proposal: fallbackRun.proposal,
+      candidates: fallbackRun.candidates,
       trace: [...trace, ...fallbackRun.trace],
       agentSummary: 'Model explored options; final proposal consolidated via deterministic safety guard.'
     };
   }
+
+  // Deduplicate candidate proposals
+  const uniqueProposals = [];
+  const seen = new Set();
+  for (const p of draftedProposals) {
+    const key = `${p.proposedPlan.selectedTransport?.id}_${p.proposedPlan.selectedAccommodation?.id}_${p.proposedPlan.inputs.duration}_${p.proposedPlan.inputs.budget}`;
+    if (!seen.has(key)) {
+      seen.add(key);
+      uniqueProposals.push(p);
+    }
+  }
+
+  const isDisrupted = Boolean((simulatedDisruption || activeTrip.simulatedDisruption)?.outdoorUnsuitable);
+  let recommended = uniqueProposals[0];
+  if (isDisrupted) {
+    recommended = uniqueProposals.find(p => p.strategy?.includes('Comfort') || p.strategy?.includes('Indoor')) || uniqueProposals[0];
+  } else if (
+    (requestedChanges.budgetDelta !== undefined && requestedChanges.budgetDelta < 0) ||
+    (requestedChanges.budget !== undefined && requestedChanges.budget < activeTrip.inputs.budget)
+  ) {
+    recommended = uniqueProposals.find(p => p.strategy?.includes('Budget')) || uniqueProposals[0];
+  }
+
+  const candidates = uniqueProposals.map(p => ({
+    strategy: p.strategy || 'Alternative Plan',
+    proposal: p,
+    tradeoffs: Array.isArray(p.tradeoffs) ? p.tradeoffs : [],
+    costDifference: p.costImpact?.costDifference ?? 0,
+    recommended: p.proposalId === recommended.proposalId
+  }));
 
   return {
     success: true,
     mode: 'live-llm-agent',
     provider: `Google Gemini (${modelToUse})`,
     model: modelToUse,
-    proposal: finalProposal,
+    proposal: recommended,
+    candidates,
     trace,
-    agentSummary: finalProposal.agentExplanation || 'Recovery proposal drafted via genuine Gemini tool calling.'
+    agentSummary: recommended.agentExplanation || 'Recovery proposal drafted via genuine Gemini tool calling.'
   };
 }
 
@@ -710,6 +832,554 @@ export async function handleRecoverRequest(req, res) {
  * POST /api/agent/recover
  */
 app.post('/api/agent/recover', handleRecoverRequest);
+
+/**
+ * Core Request Handler for POST /api/agent/parse-intent
+ * Extracts structured travel parameters from natural language input.
+ * Supports Gemini structured extraction with honest deterministic fallback on error or cooldown.
+ */
+export async function handleParseIntentRequest(req, res) {
+  try {
+    const { text, activeTrip } = req.body || {};
+
+    if (!text || typeof text !== 'string' || !text.trim()) {
+      return res.status(400).json({
+        success: false,
+        error: 'Invalid request: "text" string (max 500 characters) is required.'
+      });
+    }
+
+    if (text.length > 500) {
+      return res.status(400).json({
+        success: false,
+        error: 'Input text exceeds 500 characters limit.'
+      });
+    }
+
+    if (!activeTrip || !activeTrip.inputs || !activeTrip.id) {
+      return res.status(400).json({
+        success: false,
+        error: 'Invalid request: "activeTrip" with valid inputs and ID is required.'
+      });
+    }
+
+    const forceFallback = Boolean(req.body && req.body.forceFallback);
+    const customAiClient = req.app?.locals?.aiClient || req.body?.mockAiClient || null;
+    const apiKey = !forceFallback && (customAiClient || (process.env.GEMINI_API_KEY && process.env.GEMINI_API_KEY.trim()))
+      ? (process.env.GEMINI_API_KEY ? process.env.GEMINI_API_KEY.trim() : 'mock-key')
+      : null;
+
+    const isQuotaInCooldown = getQuotaCooldownStatus().isQuotaExceeded;
+
+    // Mode A: Quota cooldown, forceFallback, or no API key -> Deterministic Fallback
+    if (forceFallback || !apiKey || isQuotaInCooldown) {
+      const intent = parseIntentDeterministic(text, activeTrip);
+      return res.json({
+        success: true,
+        mode: isQuotaInCooldown ? 'deterministic-fallback-on-error' : 'deterministic-fallback',
+        provider: isQuotaInCooldown ? 'TripOS Rule-Based Intent Parser (Quota Cooldown)' : 'TripOS Rule-Based Intent Parser',
+        intent
+      });
+    }
+
+    // Mode B: Live LLM Structured Intent Extraction
+    const modelToUse = process.env.GEMINI_MODEL || DEFAULT_GEMINI_MODEL;
+    const ai = customAiClient || new GoogleGenAI({ apiKey });
+
+    try {
+      const systemInstruction = `You are the TripOS Natural Language Travel Intent Parser.
+Extract structured trip changes from the user's natural language request.
+Active Trip Baseline:
+- Origin: ${activeTrip.inputs.origin}
+- Destination: ${activeTrip.inputs.destination}
+- Duration: ${activeTrip.inputs.duration} days
+- Budget: ₹${activeTrip.inputs.budget}
+- Travellers: ${activeTrip.inputs.travellers}
+- Transport: ${activeTrip.inputs.transportPreference}
+- Accommodation: ${activeTrip.inputs.accommodationPreference}
+
+User Command: "${text.slice(0, 500)}"
+
+Rules:
+1. NEVER compute or calculate final trip prices. Only extract delta or target values requested by the user.
+2. "4k" means 4000 INR. "a day" means 1 day.
+3. If user says "cut/reduce budget by X", set budgetDelta to -X. If "increase budget by X", set budgetDelta to +X.
+4. If user says "add a day", durationDelta is +1. If "shorten by 2 days", durationDelta is -2.
+5. If user mentions bad weather (rain, blizzard, snow, storm, landslide), set simulatedDisruption with outdoorUnsuitable: true and reason.
+6. Provide confidence between 0.0 and 1.0. If the request is unclear or contradictory, set needsClarification with a friendly question for the user.
+7. Return pure JSON matching the requested schema.`;
+
+      const response = await ai.models.generateContent({
+        model: modelToUse,
+        contents: [
+          { role: 'user', parts: [{ text: systemInstruction }] }
+        ],
+        config: {
+          responseMimeType: 'application/json',
+          responseSchema: {
+            type: 'object',
+            properties: {
+              durationDelta: { type: 'number' },
+              budgetDelta: { type: 'number' },
+              duration: { type: 'number' },
+              budget: { type: 'number' },
+              travellers: { type: 'number' },
+              destination: { type: 'string' },
+              origin: { type: 'string' },
+              transportPreference: { type: 'string' },
+              accommodationPreference: { type: 'string' },
+              interests: { type: 'array', items: { type: 'string' } },
+              simulatedDisruption: {
+                type: 'object',
+                properties: {
+                  outdoorUnsuitable: { type: 'boolean' },
+                  reason: { type: 'string' }
+                }
+              },
+              userReason: { type: 'string' },
+              goal: { type: 'string', enum: ['cheaper', 'faster', 'indoor', 'balanced'] },
+              confidence: { type: 'number' },
+              needsClarification: { type: 'string' }
+            },
+            required: ['confidence']
+          }
+        }
+      });
+
+      const candidateText = response.candidates?.[0]?.content?.parts?.[0]?.text || response.text;
+      let parsedJson = null;
+      try {
+        parsedJson = JSON.parse(candidateText);
+      } catch (jsonErr) {
+        parsedJson = parseIntentDeterministic(text, activeTrip);
+      }
+
+      // Validate output with calculateTripDeltas rules
+      const origDuration = parseInt(activeTrip.inputs.duration, 10) || 1;
+      const origBudget = parseInt(activeTrip.inputs.budget, 10) || 0;
+
+      let resDuration = origDuration;
+      if (parsedJson.durationDelta !== undefined) resDuration += parsedJson.durationDelta;
+      else if (parsedJson.duration !== undefined) resDuration = parsedJson.duration;
+
+      let resBudget = origBudget;
+      if (parsedJson.budgetDelta !== undefined) resBudget += parsedJson.budgetDelta;
+      else if (parsedJson.budget !== undefined) resBudget = parsedJson.budget;
+
+      if (resDuration < 1) {
+        parsedJson.confidence = 0.3;
+        parsedJson.needsClarification = `Trip duration would become ${resDuration} day(s). Resulting duration must be at least 1 day.`;
+      } else if (resBudget <= 0) {
+        parsedJson.confidence = 0.3;
+        parsedJson.needsClarification = `Trip budget would become ₹${resBudget}. Resulting budget must be greater than ₹0.`;
+      }
+
+      return res.json({
+        success: true,
+        mode: 'live-llm-agent',
+        provider: `Google Gemini (${modelToUse})`,
+        intent: {
+          ...parsedJson,
+          userReason: parsedJson.userReason || text.trim()
+        }
+      });
+    } catch (err) {
+      const isQuota = isGeminiQuotaExceededError(err);
+      if (isQuota) {
+        setQuotaCooldown();
+        console.warn('[TripOS Agent Server] Gemini API quota exceeded (HTTP 429) during intent parsing. Entering cooldown, falling back to deterministic parser.');
+      } else {
+        const safeMsg = sanitizeSecrets(err.message || 'Unknown error');
+        console.warn('[TripOS Agent Server] Gemini intent parsing failed, falling back to deterministic parser:', safeMsg);
+      }
+
+      const intent = parseIntentDeterministic(text, activeTrip);
+      return res.json({
+        success: true,
+        mode: isQuota ? 'deterministic-fallback-on-error' : 'deterministic-fallback',
+        provider: isQuota ? 'TripOS Rule-Based Intent Parser (Quota Cooldown)' : 'TripOS Rule-Based Intent Parser',
+        intent
+      });
+    }
+  } catch (err) {
+    const safeError = sanitizeSecrets(err.message || 'Internal intent parsing error');
+    console.error('[TripOS Agent Server] Intent parse error:', safeError);
+    return res.status(500).json({
+      success: false,
+      error: safeError
+    });
+  }
+}
+
+/**
+ * POST /api/agent/parse-intent
+ */
+app.post('/api/agent/parse-intent', handleParseIntentRequest);
+
+/**
+ * Validates and clamps an AI-generated catalog structure.
+ * Rejects nonsense and returns null if fatal schema violations occur.
+ */
+export function validateAndClampCatalog(raw, origin, destination) {
+  if (!raw || typeof raw !== 'object') return null;
+
+  const destClean = destination.trim();
+  const name = typeof raw.name === 'string' && raw.name.trim() ? raw.name.trim() : destClean;
+
+  // 1. Accommodations validation
+  if (!Array.isArray(raw.accommodations) || raw.accommodations.length === 0) {
+    return null;
+  }
+
+  const validAccommodations = [];
+  const seenAccIds = new Set();
+  for (const acc of raw.accommodations) {
+    if (!acc || typeof acc !== 'object') continue;
+    const type = ['Hostel', 'Standard', 'Luxury'].includes(acc.type) ? acc.type : 'Standard';
+    const rawCost = parseInt(acc.costPerNight, 10);
+    if (isNaN(rawCost) || rawCost <= 0) continue;
+    const costPerNight = Math.max(300, Math.min(50000, rawCost));
+    const rating = Math.max(1.0, Math.min(5.0, parseFloat(acc.rating) || 4.2));
+    const id = acc.id && !seenAccIds.has(acc.id)
+      ? String(acc.id)
+      : `acc-${type.toLowerCase()}-${destClean.toLowerCase()}-${seenAccIds.size + 1}`;
+    seenAccIds.add(id);
+
+    validAccommodations.push({
+      id,
+      name: String(acc.name || `${name} ${type} Hotel`),
+      type,
+      costPerNight,
+      rating: Math.round(rating * 10) / 10,
+      amenities: Array.isArray(acc.amenities) && acc.amenities.length > 0
+        ? acc.amenities.map(String)
+        : ['WiFi', 'Air Conditioning', 'Room Service']
+    });
+  }
+
+  if (validAccommodations.length === 0) return null;
+
+  // 2. Transport Options validation
+  const distanceKm = calculateRouteDistanceKm(origin, destination);
+  let transportOptions = [];
+
+  if (Array.isArray(raw.transportOptions) && raw.transportOptions.length > 0) {
+    const seenTransIds = new Set();
+    for (const t of raw.transportOptions) {
+      if (!t || typeof t !== 'object') continue;
+      const type = ['Bus', 'Train', 'Cab', 'Flight'].includes(t.type) ? t.type : 'Bus';
+      const isFlat = Boolean(t.flatCost) || type === 'Cab';
+      const costPerPerson = !isFlat ? Math.max(100, parseInt(t.costPerPerson, 10) || 1000) : null;
+      const flatCost = isFlat ? Math.max(1000, parseInt(t.flatCost, 10) || 5000) : null;
+      const id = t.id && !seenTransIds.has(t.id)
+        ? String(t.id)
+        : `trans-${type.toLowerCase()}-${destClean.toLowerCase()}-${seenTransIds.size + 1}`;
+      seenTransIds.add(id);
+
+      transportOptions.push({
+        id,
+        name: String(t.name || `${type} to ${name}`),
+        type,
+        costPerPerson,
+        flatCost,
+        duration: String(t.duration || 'Estimated route time'),
+        description: String(t.description || `${type} service from ${origin} to ${destination}`)
+      });
+    }
+  }
+
+  if (transportOptions.length === 0) {
+    transportOptions = buildRouteTransportOptions(origin, destination);
+  }
+
+  // 3. Attractions validation (require at least 1 indoor and 1 outdoor)
+  if (!Array.isArray(raw.attractions) || raw.attractions.length < 2) {
+    return null;
+  }
+
+  const validAttractions = [];
+  const seenAttIds = new Set();
+  let hasOutdoor = false;
+  let hasIndoor = false;
+
+  for (const att of raw.attractions) {
+    if (!att || typeof att !== 'object' || !att.name) continue;
+    const isOutdoor = Boolean(att.isOutdoor);
+    if (isOutdoor) hasOutdoor = true;
+    else hasIndoor = true;
+
+    const id = att.id && !seenAttIds.has(att.id)
+      ? String(att.id)
+      : `act-${destClean.toLowerCase()}-${seenAttIds.size + 1}`;
+    seenAttIds.add(id);
+
+    validAttractions.push({
+      id,
+      name: String(att.name),
+      category: String(att.category || (isOutdoor ? 'Nature' : 'Culture')),
+      isOutdoor,
+      costPerPerson: Math.max(0, parseInt(att.costPerPerson, 10) || 0),
+      duration: String(att.duration || '2-3 hours'),
+      description: String(att.description || `Explore ${att.name} in ${name}`)
+    });
+  }
+
+  // Ensure at least one indoor attraction exists for weather disruption resilience
+  if (!hasIndoor) {
+    validAttractions.push({
+      id: `act-${destClean.toLowerCase()}-indoor-cultural`,
+      name: `${name} Regional Heritage Museum & Cultural Center`,
+      category: 'Culture',
+      isOutdoor: false,
+      costPerPerson: 100,
+      duration: '2 hours',
+      description: `Indoor sheltered cultural exhibits and heritage displays in ${name}.`
+    });
+  }
+
+  // 4. Restaurants validation
+  const restaurants = Array.isArray(raw.restaurants) && raw.restaurants.length > 0
+    ? raw.restaurants.map(r => ({
+        name: String(r.name || `Local Dining in ${name}`),
+        cuisine: String(r.cuisine || 'Regional Cuisine'),
+        avgCostPerPerson: Math.max(150, parseInt(r.avgCostPerPerson, 10) || 450),
+        note: String(r.note || 'Popular local spot')
+      }))
+    : [
+        { name: `Traditional Tastes of ${name}`, cuisine: 'Regional Speciality', avgCostPerPerson: 350, note: 'Beloved local eatery' },
+        { name: `${name} Central Cafe`, cuisine: 'Multi-Cuisine & Snacks', avgCostPerPerson: 550, note: 'Comfortable indoor cafe' }
+      ];
+
+  return {
+    name,
+    state: String(raw.state || 'Regional Destination'),
+    country: String(raw.country || 'India'),
+    tagline: String(raw.tagline || `Explore the beauty and culture of ${name}`),
+    bestTime: String(raw.bestTime || 'October to April'),
+    currency: 'INR (₹)',
+    transportOptions,
+    accommodations: validAccommodations,
+    attractions: validAttractions,
+    restaurants
+  };
+}
+
+/**
+ * POST /api/agent/generate-catalog
+ * Endpoint generating or retrieving catalog for destination & origin.
+ */
+export async function handleGenerateCatalogRequest(req, res, customAiClient = null) {
+  try {
+    const { origin, destination } = req.body || {};
+
+    if (!destination || typeof destination !== 'string' || !destination.trim()) {
+      return res.status(400).json({
+        success: false,
+        error: 'destination is required and must be a non-empty string.'
+      });
+    }
+
+    if (!origin || typeof origin !== 'string' || !origin.trim()) {
+      return res.status(400).json({
+        success: false,
+        error: 'origin is required and must be a non-empty string.'
+      });
+    }
+
+    const cleanOrigin = origin.trim();
+    const cleanDest = destination.trim();
+    const destKey = cleanDest.toLowerCase();
+
+    // 1. Curated destination check
+    if (CURATED_DESTINATIONS[destKey]) {
+      const curated = getDestinationData(cleanDest, cleanOrigin);
+      return res.json({
+        success: true,
+        mode: 'curated',
+        catalog: curated
+      });
+    }
+
+    // 2. Server in-memory cache check
+    const cached = getCachedCatalog(cleanOrigin, cleanDest);
+    if (cached) {
+      return res.json({
+        success: true,
+        mode: cached.source === 'gemini-ai' ? 'live-llm-agent' : 'deterministic-fallback',
+        catalog: cached
+      });
+    }
+
+    const apiKey = process.env.GEMINI_API_KEY;
+    const canUseLiveLlm = Boolean(apiKey && !isQuotaInCooldown());
+
+    const runRuleBasedFallback = (mode, isQuota = false) => {
+      const fallbackCatalog = getDestinationData(cleanDest, cleanOrigin);
+      registerCustomCatalog(cleanOrigin, cleanDest, fallbackCatalog);
+      return res.json({
+        success: true,
+        mode,
+        catalog: fallbackCatalog
+      });
+    };
+
+    if (!canUseLiveLlm) {
+      return runRuleBasedFallback('deterministic-fallback');
+    }
+
+    // 3. Live LLM Generation via Gemini 2.5 Flash
+    const modelToUse = process.env.GEMINI_MODEL || DEFAULT_GEMINI_MODEL;
+    const ai = customAiClient || new GoogleGenAI({ apiKey });
+
+    try {
+      const prompt = `You are the TripOS Travel Catalog Generator.
+Generate a realistic, destination-specific travel catalog for travel from "${cleanOrigin}" to "${cleanDest}".
+
+Provide:
+1. transportOptions: realistic modes (Bus, Train, Cab, Flight) connecting ${cleanOrigin} to ${cleanDest}.
+   Each must have unique id, name, type (Bus/Train/Cab/Flight), costPerPerson (or flatCost for Cab), duration, description.
+2. accommodations: 3 tiers (Hostel, Standard, Luxury) with real-sounding local hotel/resort names appropriate for ${cleanDest}.
+   Each with id, name, type (Hostel/Standard/Luxury), costPerNight (Hostel: 500-1200, Standard: 2000-4500, Luxury: 6000-18000), rating (4.0-5.0), amenities.
+3. attractions: at least 4 top sights in ${cleanDest}. At least one MUST be indoor (isOutdoor: false) for bad weather, and at least one outdoor (isOutdoor: true).
+   Each with id, name, category (Culture, Nature, Adventure, Relaxation, Food, Shopping), isOutdoor (boolean), costPerPerson, duration, description.
+4. restaurants: at least 3 local dining spots with cuisine, avgCostPerPerson, note.
+5. metadata: name, state, country, tagline, bestTime, currency ("INR (₹)").
+
+Return pure JSON matching the schema.`;
+
+      const response = await ai.models.generateContent({
+        model: modelToUse,
+        contents: [{ role: 'user', parts: [{ text: prompt }] }],
+        config: {
+          responseMimeType: 'application/json',
+          responseSchema: {
+            type: 'object',
+            properties: {
+              name: { type: 'string' },
+              state: { type: 'string' },
+              country: { type: 'string' },
+              tagline: { type: 'string' },
+              bestTime: { type: 'string' },
+              currency: { type: 'string' },
+              transportOptions: {
+                type: 'array',
+                items: {
+                  type: 'object',
+                  properties: {
+                    id: { type: 'string' },
+                    name: { type: 'string' },
+                    type: { type: 'string', enum: ['Bus', 'Train', 'Cab', 'Flight'] },
+                    costPerPerson: { type: 'number' },
+                    flatCost: { type: 'number' },
+                    duration: { type: 'string' },
+                    description: { type: 'string' }
+                  },
+                  required: ['id', 'name', 'type', 'duration']
+                }
+              },
+              accommodations: {
+                type: 'array',
+                items: {
+                  type: 'object',
+                  properties: {
+                    id: { type: 'string' },
+                    name: { type: 'string' },
+                    type: { type: 'string', enum: ['Hostel', 'Standard', 'Luxury'] },
+                    costPerNight: { type: 'number' },
+                    rating: { type: 'number' },
+                    amenities: { type: 'array', items: { type: 'string' } }
+                  },
+                  required: ['id', 'name', 'type', 'costPerNight', 'rating']
+                }
+              },
+              attractions: {
+                type: 'array',
+                items: {
+                  type: 'object',
+                  properties: {
+                    id: { type: 'string' },
+                    name: { type: 'string' },
+                    category: { type: 'string' },
+                    isOutdoor: { type: 'boolean' },
+                    costPerPerson: { type: 'number' },
+                    duration: { type: 'string' },
+                    description: { type: 'string' }
+                  },
+                  required: ['id', 'name', 'isOutdoor', 'costPerPerson']
+                }
+              },
+              restaurants: {
+                type: 'array',
+                items: {
+                  type: 'object',
+                  properties: {
+                    name: { type: 'string' },
+                    cuisine: { type: 'string' },
+                    avgCostPerPerson: { type: 'number' },
+                    note: { type: 'string' }
+                  },
+                  required: ['name', 'cuisine', 'avgCostPerPerson']
+                }
+              }
+            },
+            required: ['name', 'transportOptions', 'accommodations', 'attractions']
+          }
+        }
+      });
+
+      const candidateText = response.candidates?.[0]?.content?.parts?.[0]?.text || response.text;
+      let rawCatalog = null;
+      try {
+        rawCatalog = JSON.parse(candidateText);
+      } catch (e) {
+        console.warn('[TripOS Agent Server] Could not parse Gemini catalog JSON:', e.message);
+        return runRuleBasedFallback('deterministic-fallback');
+      }
+
+      const validatedCatalog = validateAndClampCatalog(rawCatalog, cleanOrigin, cleanDest);
+      if (!validatedCatalog) {
+        console.warn('[TripOS Agent Server] Gemini catalog failed validation, falling back to rule-based.');
+        return runRuleBasedFallback('deterministic-fallback');
+      }
+
+      validatedCatalog.isCurated = false;
+      validatedCatalog.isSampleEstimate = true;
+      validatedCatalog.dataSourceNotice = 'AI-estimated catalog (Gemini) — not verified live prices';
+      validatedCatalog.source = 'gemini-ai';
+
+      registerCustomCatalog(cleanOrigin, cleanDest, validatedCatalog);
+
+      return res.json({
+        success: true,
+        mode: 'live-llm-agent',
+        provider: `Google Gemini (${modelToUse})`,
+        catalog: validatedCatalog
+      });
+    } catch (err) {
+      const isQuota = isGeminiQuotaExceededError(err);
+      if (isQuota) {
+        setQuotaCooldown();
+        console.warn('[TripOS Agent Server] Gemini API quota exceeded (HTTP 429) during catalog generation. Entering cooldown, falling back to rule-based.');
+      } else {
+        const safeMsg = sanitizeSecrets(err.message || 'Unknown error');
+        console.warn('[TripOS Agent Server] Gemini catalog generation failed, falling back to rule-based:', safeMsg);
+      }
+      return runRuleBasedFallback(isQuota ? 'deterministic-fallback-on-error' : 'deterministic-fallback', isQuota);
+    }
+  } catch (err) {
+    const safeError = sanitizeSecrets(err.message || 'Internal catalog generation error');
+    console.error('[TripOS Agent Server] Catalog generation error:', safeError);
+    return res.status(500).json({
+      success: false,
+      error: safeError
+    });
+  }
+}
+
+/**
+ * POST /api/agent/generate-catalog
+ */
+app.post('/api/agent/generate-catalog', handleGenerateCatalogRequest);
 
 // Self-starting logic when run directly (e.g. "node server/agentServer.js")
 const isDirectRun = process.argv[1] && process.argv[1].endsWith('agentServer.js') && !process.argv[1].includes('.test.');

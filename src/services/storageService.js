@@ -6,7 +6,8 @@
 const STORAGE_KEYS = {
   SAVED_TRIPS: 'tripos_saved_trips_v1',
   ACTIVE_TRIP_ID: 'tripos_active_trip_id_v1',
-  RECOVERY_HISTORY: 'tripos_recovery_history_v1'
+  RECOVERY_HISTORY: 'tripos_recovery_history_v1',
+  MIGRATION_CLEAN_DEMO_SEED: 'tripos_clean_demo_seed_v2'
 };
 
 /**

@@ -76,9 +76,10 @@ describe('TripOS Agent Server & Execution Loop', () => {
 
       const data = await res.json();
       expect(data.status).toBe('online');
-      expect(data.registeredTools).toHaveLength(4);
+      expect(data.registeredTools).toHaveLength(5);
       expect(data.registeredTools).toContain('inspect_active_trip');
       expect(data.registeredTools).toContain('draft_recovery_proposal');
+      expect(data.registeredTools).toContain('verify_proposal');
 
       // CRITICAL: Ensure API key is NEVER exposed anywhere in the response
       const rawString = JSON.stringify(data);

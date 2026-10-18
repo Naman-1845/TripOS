@@ -51,9 +51,10 @@ describe('Shared Agent Tools Suite', () => {
   };
 
   // 1. Tool Definitions Export
-  it('exposes valid declarative definitions for all 4 tools', () => {
-    expect(AGENT_TOOL_NAMES).toHaveLength(4);
-    expect(AGENT_TOOL_DEFINITIONS).toHaveLength(4);
+  it('exposes valid declarative definitions for all 5 tools', () => {
+    expect(AGENT_TOOL_NAMES).toHaveLength(5);
+    expect(AGENT_TOOL_DEFINITIONS).toHaveLength(5);
+    expect(AGENT_TOOL_NAMES).toContain('verify_proposal');
     AGENT_TOOL_NAMES.forEach(name => {
       const def = AGENT_TOOL_DEFINITIONS.find(d => d.name === name);
       expect(def).toBeDefined();

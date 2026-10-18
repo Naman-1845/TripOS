@@ -22,7 +22,7 @@ export default function Navbar({
   if (agentStatus?.isOnline) {
     if (agentStatus.mode === 'live-llm-agent') {
       pillStyle = 'bg-emerald-50 border-emerald-200 text-emerald-800';
-      pillText = `Live Gemini Agent (${agentStatus.model || 'gemini-3.8-flash'})`;
+      pillText = `Live Gemini Agent (${agentStatus.model || 'gemini-2.5-flash'})`;
       pillTitle = 'Google Gemini live function calling enabled. Secrets secured server-side.';
       isLive = true;
     } else {

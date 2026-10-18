@@ -18,7 +18,8 @@ export const AGENT_TOOL_NAMES = [
   'inspect_active_trip',
   'search_travel_options',
   'calculate_trip_budget',
-  'draft_recovery_proposal'
+  'draft_recovery_proposal',
+  'verify_proposal'
 ];
 
 /**
@@ -88,6 +89,15 @@ export const AGENT_TOOL_DEFINITIONS = [
         newTravellers: { type: 'number', description: 'Revised traveller count' },
         selectedTransportId: { type: 'string', description: 'Verified transport ID from catalog' },
         selectedAccommodationId: { type: 'string', description: 'Verified accommodation ID from catalog' },
+        strategy: {
+          type: 'string',
+          description: 'Strategy classification: "Budget Saver", "Time Saver / Fastest", or "Comfort/Indoor-Safe"'
+        },
+        tradeoffs: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Pros and cons of this specific proposal strategy'
+        },
         actionsTaken: {
           type: 'array',
           items: { type: 'string' },
@@ -104,6 +114,29 @@ export const AGENT_TOOL_DEFINITIONS = [
         }
       },
       required: ['newDuration', 'newBudget', 'actionsTaken', 'agentExplanation']
+    }
+  },
+  {
+    name: 'verify_proposal',
+    description: 'Deterministically verifies proposal parameters against catalog constraints, budget limits, minimum duration, and weather disruption suitability.',
+    parameters: {
+      type: 'object',
+      properties: {
+        destination: { type: 'string', description: 'Destination city name' },
+        duration: { type: 'number', description: 'Trip duration in days (must be >= 1)' },
+        budget: { type: 'number', description: 'Target user budget in ₹' },
+        selectedTransportId: { type: 'string', description: 'Transport ID from catalog' },
+        selectedAccommodationId: { type: 'string', description: 'Accommodation ID from catalog' },
+        totalEstimatedExpenses: { type: 'number', description: 'Total expenses calculated via calculate_trip_budget' },
+        simulatedDisruption: {
+          type: 'object',
+          properties: {
+            outdoorUnsuitable: { type: 'boolean' },
+            reason: { type: 'string' }
+          }
+        }
+      },
+      required: ['destination', 'duration', 'budget', 'selectedTransportId', 'selectedAccommodationId', 'totalEstimatedExpenses']
     }
   }
 ];
@@ -130,14 +163,14 @@ export function inspect_active_trip({ activeTrip }) {
     interests: inputs.interests || [],
     currentTransport: {
       id: selectedTransport?.id || null,
-      name: selectedTransport?.name || 'Standard Transport',
+      name: selectedTransport?.name || (inputs.transportPreference ? `${inputs.transportPreference} Transit` : null),
       type: selectedTransport?.type || inputs.transportPreference,
       costPerPerson: selectedTransport?.costPerPerson || null,
       flatCost: selectedTransport?.flatCost || null
     },
     currentAccommodation: {
       id: selectedAccommodation?.id || null,
-      name: selectedAccommodation?.name || 'Standard Hotel',
+      name: selectedAccommodation?.name || (inputs.accommodationPreference ? `${inputs.accommodationPreference} Stay` : null),
       type: selectedAccommodation?.type || inputs.accommodationPreference,
       costPerNight: selectedAccommodation?.costPerNight || null
     },
@@ -157,12 +190,17 @@ export function inspect_active_trip({ activeTrip }) {
  * Tool 2: search_travel_options
  * Queries verified accommodations, transport, attractions, and dining from the destination catalog.
  */
-export function search_travel_options({ destination, category = 'all', indoorOnly = false }) {
+export function search_travel_options(
+  { destination, category = 'all', indoorOnly = false, origin = null, customCatalog = null },
+  context = {}
+) {
   if (!destination || typeof destination !== 'string' || !destination.trim()) {
     throw new Error('search_travel_options requires a valid non-empty destination string.');
   }
 
-  const destData = getDestinationData(destination.trim());
+  const effectiveOrigin = origin || context.activeTrip?.inputs?.origin || null;
+  const effectiveCustomCatalog = customCatalog || context.activeTrip?.destinationCatalog || context.activeTrip?.itinerary?.destinationDetails || null;
+  const destData = getDestinationData(destination.trim(), effectiveOrigin, effectiveCustomCatalog);
   if (!destData) {
     throw new Error(`Unable to resolve destination catalog data for "${destination}".`);
   }
@@ -230,15 +268,20 @@ export function search_travel_options({ destination, category = 'all', indoorOnl
  * Tool 3: calculate_trip_budget
  * Uses deterministic budget engine. Verifies catalog IDs and uses strictly verified prices.
  */
-export function calculate_trip_budget({
-  destination,
-  budget,
-  duration,
-  travellers,
-  selectedTransportId,
-  selectedAccommodationId,
-  activityIds = []
-}) {
+export function calculate_trip_budget(
+  {
+    destination,
+    budget,
+    duration,
+    travellers,
+    selectedTransportId,
+    selectedAccommodationId,
+    activityIds = [],
+    origin = null,
+    customCatalog = null
+  },
+  context = {}
+) {
   // 1. Strict Input Validation
   if (!destination || typeof destination !== 'string' || !destination.trim()) {
     throw new Error('calculate_trip_budget: destination must be a non-empty string.');
@@ -260,7 +303,9 @@ export function calculate_trip_budget({
   }
 
   // 2. Catalog Lookup & ID Verification
-  const destData = getDestinationData(destination.trim());
+  const effectiveOrigin = origin || context.activeTrip?.inputs?.origin || null;
+  const effectiveCustomCatalog = customCatalog || context.activeTrip?.destinationCatalog || context.activeTrip?.itinerary?.destinationDetails || null;
+  const destData = getDestinationData(destination.trim(), effectiveOrigin, effectiveCustomCatalog);
   if (!destData) {
     throw new Error(`calculate_trip_budget: destination "${destination}" could not be resolved.`);
   }
@@ -345,6 +390,8 @@ export function draft_recovery_proposal({
   newTravellers,
   selectedTransportId,
   selectedAccommodationId,
+  strategy = 'Balanced Recovery',
+  tradeoffs = [],
   actionsTaken = [],
   agentExplanation,
   userReason,
@@ -378,27 +425,44 @@ export function draft_recovery_proposal({
     ? parseInt(newTravellers, 10)
     : activeTrip.inputs.travellers;
 
-  const destData = getDestinationData(targetDestination);
+  const destCatalog = (targetDestination === activeTrip.inputs.destination)
+    ? (activeTrip.destinationCatalog || activeTrip.itinerary?.destinationDetails)
+    : null;
+  const destData = getDestinationData(targetDestination, targetOrigin, destCatalog);
   if (!destData) {
     throw new Error(`draft_recovery_proposal: unable to resolve catalog data for destination "${targetDestination}".`);
   }
 
-  // Resolve verified transport
-  const chosenTransport = selectedTransportId
+  // Determine if route is unchanged (destination + origin both same) to allow reusing existing transport
+  const isSameRoute = targetDestination === activeTrip.inputs.destination && targetOrigin === activeTrip.inputs.origin;
+
+  const resolvedTransport = selectedTransportId
     ? destData?.transportOptions?.find(t => t.id === selectedTransportId)
-    : (targetDestination === activeTrip.inputs.destination ? activeTrip.selectedTransport : null) || destData?.transportOptions?.[0];
+    : null;
+  const chosenTransport = resolvedTransport
+    || (isSameRoute ? activeTrip.selectedTransport : null)
+    || destData?.transportOptions?.[0];
 
   if (!chosenTransport) {
-    throw new Error(`draft_recovery_proposal: could not resolve transport with ID "${selectedTransportId}".`);
+    throw new Error(`draft_recovery_proposal: no transport options available for "${targetDestination}".`);
+  }
+  if (selectedTransportId && !resolvedTransport) {
+    actionsTaken.push(`Note: requested transport ID "${selectedTransportId}" not found in ${targetDestination} catalog — fell back to "${chosenTransport.name}".`);
   }
 
   // Resolve verified accommodation
-  const chosenAccommodation = selectedAccommodationId
+  const resolvedAccommodation = selectedAccommodationId
     ? destData?.accommodations?.find(a => a.id === selectedAccommodationId)
-    : (targetDestination === activeTrip.inputs.destination ? activeTrip.selectedAccommodation : null) || destData?.accommodations?.[0];
+    : null;
+  const chosenAccommodation = resolvedAccommodation
+    || (targetDestination === activeTrip.inputs.destination ? activeTrip.selectedAccommodation : null)
+    || destData?.accommodations?.[0];
 
   if (!chosenAccommodation) {
-    throw new Error(`draft_recovery_proposal: could not resolve accommodation with ID "${selectedAccommodationId}".`);
+    throw new Error(`draft_recovery_proposal: no accommodation options available for "${targetDestination}".`);
+  }
+  if (selectedAccommodationId && !resolvedAccommodation) {
+    actionsTaken.push(`Note: requested accommodation ID "${selectedAccommodationId}" not found in ${targetDestination} catalog — fell back to "${chosenAccommodation.name}".`);
   }
 
   const finalDisruption = simulatedDisruption !== undefined
@@ -472,6 +536,8 @@ export function draft_recovery_proposal({
     createdAt: new Date().toISOString(),
     status: 'pending', // Invariant: must be pending until explicit user action
     source: 'agent',
+    strategy: String(strategy || 'Balanced Recovery'),
+    tradeoffs: Array.isArray(tradeoffs) ? tradeoffs : [],
     agentExplanation: agentExplanation.trim(),
     userReason: userReason ? String(userReason).trim() : null,
     triggerReasons,
@@ -514,6 +580,98 @@ export function draft_recovery_proposal({
 }
 
 /**
+ * Tool 5: verify_proposal
+ * Deterministically verifies proposal parameters against catalog constraints, budget limits, minimum duration, and disruption suitability.
+ */
+export function verify_proposal(
+  {
+    destination,
+    duration,
+    budget,
+    selectedTransportId,
+    selectedAccommodationId,
+    totalEstimatedExpenses,
+    simulatedDisruption = null,
+    origin = null,
+    customCatalog = null
+  },
+  context = {}
+) {
+  if (!destination || typeof destination !== 'string') {
+    throw new Error('verify_proposal requires a valid destination string.');
+  }
+
+  const effectiveOrigin = origin || context.activeTrip?.inputs?.origin || null;
+  const effectiveCustomCatalog = customCatalog || context.activeTrip?.destinationCatalog || context.activeTrip?.itinerary?.destinationDetails || null;
+  const destData = getDestinationData(destination.trim(), effectiveOrigin, effectiveCustomCatalog);
+  if (!destData) {
+    return {
+      verified: false,
+      checks: {
+        catalogResolved: false,
+        transportValid: false,
+        accommodationValid: false,
+        durationValid: false,
+        budgetValid: false,
+        withinBudget: false,
+        weatherCompliant: false
+      },
+      warnings: [`Destination "${destination}" could not be resolved from catalog.`],
+      summary: `Verification failed: Destination "${destination}" not found in catalog.`
+    };
+  }
+
+  const transport = destData.transportOptions?.find(t => t.id === selectedTransportId);
+  const accommodation = destData.accommodations?.find(a => a.id === selectedAccommodationId);
+
+  const safeDuration = parseInt(duration, 10);
+  const safeBudget = parseInt(budget, 10);
+  const safeExpenses = parseInt(totalEstimatedExpenses, 10) || 0;
+
+  const durationValid = !isNaN(safeDuration) && safeDuration >= 1;
+  const budgetValid = !isNaN(safeBudget) && safeBudget > 0;
+  const withinBudget = safeExpenses <= safeBudget;
+  const transportValid = Boolean(transport);
+  const accommodationValid = Boolean(accommodation);
+
+  let weatherCompliant = true;
+  const warnings = [];
+
+  if (!transportValid) warnings.push(`Transport ID "${selectedTransportId}" is invalid for ${destination}.`);
+  if (!accommodationValid) warnings.push(`Accommodation ID "${selectedAccommodationId}" is invalid for ${destination}.`);
+  if (!durationValid) warnings.push(`Duration (${duration}) must be at least 1 day.`);
+  if (!budgetValid) warnings.push(`Budget (${budget}) must be greater than ₹0.`);
+  if (!withinBudget) warnings.push(`Total estimated expenses (₹${safeExpenses}) exceed target budget (₹${safeBudget}) by ₹${safeExpenses - safeBudget}.`);
+
+  if (simulatedDisruption?.outdoorUnsuitable) {
+    const indoorAttractions = (destData.attractions || []).filter(a => !a.isOutdoor);
+    if (indoorAttractions.length === 0) {
+      weatherCompliant = false;
+      warnings.push(`Warning: No indoor attractions identified for ${destination} during adverse weather.`);
+    }
+  }
+
+  const verified = transportValid && accommodationValid && durationValid && budgetValid && weatherCompliant;
+
+  return {
+    verified,
+    checks: {
+      catalogResolved: true,
+      transportValid,
+      accommodationValid,
+      durationValid,
+      budgetValid,
+      withinBudget,
+      weatherCompliant
+    },
+    warnings,
+    summary: verified
+      ? `Proposal parameters verified against ${destination} catalog. ${withinBudget ? 'Within budget.' : 'Exceeds target budget deficit noted.'}`
+      : `Proposal failed verification: ${warnings.join(' ')}`
+  };
+}
+
+/**
  * Universal Tool Dispatcher: executes tool by name with arguments and context
  */
 export function executeAgentTool(toolName, args = {}, context = {}) {
@@ -521,11 +679,13 @@ export function executeAgentTool(toolName, args = {}, context = {}) {
     case 'inspect_active_trip':
       return inspect_active_trip({ activeTrip: context.activeTrip || args.activeTrip });
     case 'search_travel_options':
-      return search_travel_options(args);
+      return search_travel_options(args, context);
     case 'calculate_trip_budget':
-      return calculate_trip_budget(args);
+      return calculate_trip_budget(args, context);
     case 'draft_recovery_proposal':
       return draft_recovery_proposal({ ...args, activeTrip: context.activeTrip || args.activeTrip });
+    case 'verify_proposal':
+      return verify_proposal(args, context);
     default:
       throw new Error(`Unknown agent tool: "${toolName}". Available tools: [${AGENT_TOOL_NAMES.join(', ')}]`);
   }

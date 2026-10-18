@@ -1,4 +1,4 @@
-import { test, describe, beforeEach } from 'node:test';
+import { test, describe, beforeEach, expect } from 'vitest';
 import assert from 'node:assert/strict';
 
 import {

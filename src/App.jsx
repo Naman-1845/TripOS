@@ -8,6 +8,7 @@ import RecoveryModal from './components/RecoveryModal.jsx';
 import DisruptionSimulator from './components/DisruptionSimulator.jsx';
 import SavedTripsDrawer from './components/SavedTripsDrawer.jsx';
 import TripChangeForm from './components/TripChangeForm.jsx';
+import NaturalLanguageCommandBar from './components/NaturalLanguageCommandBar.jsx';
 import TravelHeroHeader from './components/TravelHeroHeader.jsx';
 
 import { DEMO_SCENARIOS } from './data/defaultScenarios.js';
@@ -209,13 +210,16 @@ export default function App() {
         return;
       }
 
-      setPendingProposal(recoveryResult.proposal);
+      setPendingProposal({
+        ...recoveryResult.proposal,
+        candidates: recoveryResult.candidates || []
+      });
 
       // Transparent notification of engine source
       if (recoveryResult.mode === 'live-llm-agent') {
-        showToast(`Recovery proposal drafted by Google Gemini (${recoveryResult.model || 'gemini-3.8-flash'})!`, 'success');
+        showToast(`Recovery proposal drafted by Google Gemini (${recoveryResult.model || 'gemini-2.5-flash'})!`, 'success');
       } else if (recoveryResult.mode === 'deterministic-fallback') {
-        showToast('Recovery proposal evaluated via server deterministic tool runner.', 'info');
+        showToast('Recovery proposals evaluated via server deterministic tool runner.', 'info');
       } else if (recoveryResult.mode === 'deterministic-fallback-on-error') {
         showToast('Gemini API encountered an error; safely executed server deterministic fallback.', 'info');
       } else {
@@ -256,12 +260,15 @@ export default function App() {
         return;
       }
 
-      setPendingProposal(recoveryResult.proposal);
+      setPendingProposal({
+        ...recoveryResult.proposal,
+        candidates: recoveryResult.candidates || []
+      });
 
       if (recoveryResult.mode === 'live-llm-agent') {
-        showToast(`Recovery proposal drafted by Google Gemini (${recoveryResult.model || 'gemini-3.8-flash'})!`, 'success');
+        showToast(`Recovery proposal drafted by Google Gemini (${recoveryResult.model || 'gemini-2.5-flash'})!`, 'success');
       } else if (recoveryResult.mode === 'deterministic-fallback') {
-        showToast('Recovery proposal evaluated via server deterministic tool runner.', 'info');
+        showToast('Recovery proposals evaluated via server deterministic tool runner.', 'info');
       } else {
         showToast('Recovery proposal generated via local heuristic engine.', 'info');
       }
@@ -274,12 +281,13 @@ export default function App() {
   };
 
   // Proposal Action: APPROVE
-  const handleApproveProposal = async () => {
-    if (!pendingProposal || !activeTrip || isApproving || isRejecting) return;
+  const handleApproveProposal = async (selectedProposal = null) => {
+    const proposalToApprove = selectedProposal || pendingProposal;
+    if (!proposalToApprove || !activeTrip || isApproving || isRejecting) return;
 
     setIsApproving(true);
     try {
-      const { updatedTrip, auditLogEntry } = applyProposal(activeTrip, pendingProposal);
+      const { updatedTrip, auditLogEntry } = applyProposal(activeTrip, proposalToApprove);
 
       // Save updated trip and log entry
       StorageService.saveTrip(updatedTrip);
@@ -291,7 +299,7 @@ export default function App() {
       setRecoveryHistory(StorageService.getRecoveryHistory());
       setPendingProposal(null);
 
-      showToast('Proposal approved! Active itinerary & budget updated.', 'success');
+      showToast(`Proposal approved (${proposalToApprove.strategy || 'Recommended'})! Active itinerary & budget updated.`, 'success');
     } catch (err) {
       console.error('[TripOS] Proposal approval error:', err);
       showToast(`Failed to apply proposal: ${err.message}`, 'error');
@@ -482,6 +490,15 @@ export default function App() {
           }}
         />
 
+        {/* Feature 1: Natural-Language Trip Command Bar */}
+        {activeTrip && (
+          <NaturalLanguageCommandBar
+            activeTrip={activeTrip}
+            isRecovering={isRecovering}
+            onRunRecovery={(overrides) => handleTriggerRecovery(overrides)}
+          />
+        )}
+
         {/* Feature: Update Trip Due to Changes (Mid-trip deltas) */}
         {activeTrip && (
           <TripChangeForm
@@ -534,10 +551,11 @@ export default function App() {
         )}
       </main>
 
-      {/* Phase 4: Travel Recovery Engine Modal (Side-by-Side Comparison) */}
+      {/* Phase 4: Travel Recovery Engine Modal (Side-by-Side Comparison & Multi-Candidate Strategy Selection) */}
       {pendingProposal && (
         <RecoveryModal
           proposal={pendingProposal}
+          candidates={pendingProposal.candidates || []}
           activeTrip={activeTrip}
           isStale={isProposalStale(pendingProposal, formData, activeTrip)}
           isApproving={isApproving}

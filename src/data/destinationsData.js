@@ -1,3 +1,5 @@
+import { buildRouteTransportOptions, calculateRouteDistanceKm } from '../services/distanceService.js';
+
 // Curated destination database with realistic estimates + dynamic generator for arbitrary locations
 
 export const CURATED_DESTINATIONS = {
@@ -131,26 +133,99 @@ export const CURATED_DESTINATIONS = {
   }
 };
 
-/**
- * Gracefully generates estimates for any arbitrary destination not in our curated dataset.
- * Labeled clearly as automated heuristic estimates.
- */
-export function getDestinationData(rawDestinationName) {
-  if (!rawDestinationName) return null;
-  const key = rawDestinationName.trim().toLowerCase();
+// In-memory runtime catalog cache for AI-generated and custom destination catalogs
+const runtimeCatalogCache = new Map();
 
+export function makeCatalogKey(origin, destination) {
+  const o = (origin || '').trim().toLowerCase();
+  const d = (destination || '').trim().toLowerCase();
+  return `${o}__${d}`;
+}
+
+export function registerCustomCatalog(origin, destination, catalog) {
+  if (!catalog || !destination) return;
+  const key = makeCatalogKey(origin, destination);
+  runtimeCatalogCache.set(key, { ...catalog, cachedAt: Date.now() });
+  // Also register under destination alone for fallback lookups
+  runtimeCatalogCache.set(destination.trim().toLowerCase(), { ...catalog, cachedAt: Date.now() });
+}
+
+export function getCachedCatalog(origin, destination) {
+  if (!destination) return null;
+  const directKey = makeCatalogKey(origin, destination);
+  if (runtimeCatalogCache.has(directKey)) {
+    return runtimeCatalogCache.get(directKey);
+  }
+  const destOnlyKey = destination.trim().toLowerCase();
+  if (runtimeCatalogCache.has(destOnlyKey)) {
+    return runtimeCatalogCache.get(destOnlyKey);
+  }
+  return null;
+}
+
+export function clearCatalogCache() {
+  runtimeCatalogCache.clear();
+}
+
+/**
+ * Resolves destination data:
+ * 1. Checks custom catalog if passed
+ * 2. Checks in-memory runtime cache (from AI generator or client storage)
+ * 3. Checks curated destinations (calibrating transport to origin when provided)
+ * 4. Fallback: generates destination-specific rule-based estimates with varied names and prices
+ */
+export function getDestinationData(rawDestinationName, origin = null, customCatalog = null) {
+  if (!rawDestinationName) return null;
+  const destClean = rawDestinationName.trim();
+  const key = destClean.toLowerCase();
+
+  // 1. Direct custom catalog override
+  if (customCatalog && (customCatalog.name?.toLowerCase() === key || customCatalog.destination?.toLowerCase() === key)) {
+    return customCatalog;
+  }
+
+  // 2. Runtime cache check (from AI generation)
+  const cached = getCachedCatalog(origin, rawDestinationName);
+  if (cached) {
+    return cached;
+  }
+
+  // 3. Curated Destination Dataset
   if (CURATED_DESTINATIONS[key]) {
+    const curated = CURATED_DESTINATIONS[key];
+    // Scale transport options if origin is specified
+    const transportOptions = origin
+      ? buildRouteTransportOptions(origin, curated.name, curated.transportOptions)
+      : curated.transportOptions;
+
     return {
-      ...CURATED_DESTINATIONS[key],
+      ...curated,
+      transportOptions,
       isCurated: true,
       dataSourceNotice: 'Curated sample travel dataset (Realistic estimates)'
     };
   }
 
-  const cleanName = rawDestinationName.trim();
-  const titleCaseName = cleanName.charAt(0).toUpperCase() + cleanName.slice(1);
+  // 4. Rule-Based Estimate for Uncurated / Arbitrary Locations
+  const titleCaseName = destClean.charAt(0).toUpperCase() + destClean.slice(1);
+  const routeOrigin = origin || 'Nearest Transit Hub';
 
-  // Return a graceful, realistic model for arbitrary user-entered locations
+  // Compute a deterministic hash to vary hotel prices and names so cities never look identical
+  let cityHash = 0;
+  for (let i = 0; i < key.length; i++) {
+    cityHash = (cityHash * 31 + key.charCodeAt(i)) >>> 0;
+  }
+
+  const hostelCost = 700 + (cityHash % 6) * 50; // 700 - 950
+  const standardCost = 2400 + (cityHash % 8) * 100; // 2400 - 3100
+  const luxuryCost = 6500 + (cityHash % 10) * 300; // 6500 - 9200
+
+  const hotelAdjectives = ['Grand', 'Heritage', 'View', 'Valley', 'Retreat', 'Palace', 'Residency'];
+  const adjIndex = cityHash % hotelAdjectives.length;
+  const selectedAdj = hotelAdjectives[adjIndex];
+
+  const transportOptions = buildRouteTransportOptions(routeOrigin, titleCaseName);
+
   return {
     name: titleCaseName,
     state: 'Regional Province',
@@ -160,29 +235,100 @@ export function getDestinationData(rawDestinationName) {
     currency: 'INR (₹)',
     isSampleEstimate: true,
     isCurated: false,
-    dataSourceNotice: 'Heuristic travel estimate (Arbitrary destination fallback - not cached)',
-    transportOptions: [
-      { id: `bus-${cleanName}`, name: `Regional Express / Sleeper Bus to ${titleCaseName}`, type: 'Bus', costPerPerson: 1000, duration: 'Estimated 8-10 hrs', description: 'Standard regional intercity highway connection' },
-      { id: `train-${cleanName}`, name: `Express Train to Nearest Railhead (${titleCaseName})`, type: 'Train', costPerPerson: 1200, duration: 'Estimated 7-9 hrs', description: 'Reserved train transit' },
-      { id: `cab-${cleanName}`, name: `Dedicated Private Cab / Outstation Taxi`, type: 'Cab', flatCost: 6500, duration: 'Flexible', description: 'Door-to-door private road vehicle' },
-      { id: `flight-${cleanName}`, name: `Connecting Domestic Flight to Nearest Airport`, type: 'Flight', costPerPerson: 5500, duration: 'Estimated 2 hrs', description: 'Aerial connection' }
-    ],
+    dataSourceNotice: 'Arbitrary destination fallback (Rule-based estimate, not verified live data)',
+    transportOptions,
     accommodations: [
-      { id: `acc-hostel-${cleanName}`, name: `Travelers Hostel & Dorms in ${titleCaseName}`, type: 'Hostel', costPerNight: 800, rating: 4.2, amenities: ['Free WiFi', 'Locker', 'Shared Lounge'] },
-      { id: `acc-std-${cleanName}`, name: `Comfort Grand Hotel ${titleCaseName}`, type: 'Standard', costPerNight: 2600, rating: 4.3, amenities: ['Attached Bathroom', 'Breakfast', 'Room Service'] },
-      { id: `acc-lux-${cleanName}`, name: `Premium Boutique Resort ${titleCaseName}`, type: 'Luxury', costPerNight: 7200, rating: 4.7, amenities: ['Pool', 'Spa', 'Fine Dining', 'Scenic View'] }
+      {
+        id: `acc-hostel-${key}`,
+        name: `${titleCaseName} Backpacker & Travelers Hub`,
+        type: 'Hostel',
+        costPerNight: hostelCost,
+        rating: 4.2 + (cityHash % 5) * 0.1,
+        amenities: ['Free WiFi', 'Locker', 'Shared Lounge']
+      },
+      {
+        id: `acc-std-${key}`,
+        name: `${titleCaseName} ${selectedAdj} Comfort Hotel`,
+        type: 'Standard',
+        costPerNight: standardCost,
+        rating: 4.3 + (cityHash % 4) * 0.1,
+        amenities: ['Attached Bathroom', 'Breakfast', 'Room Service']
+      },
+      {
+        id: `acc-lux-${key}`,
+        name: `${titleCaseName} Royal ${selectedAdj} Resort & Spa`,
+        type: 'Luxury',
+        costPerNight: luxuryCost,
+        rating: 4.7 + (cityHash % 3) * 0.1,
+        amenities: ['Pool', 'Spa', 'Fine Dining', 'Scenic View']
+      }
     ],
     attractions: [
-      { id: `act-high-${cleanName}`, name: `${titleCaseName} Central Landmark & Heritage Walk`, category: 'Culture', isOutdoor: true, costPerPerson: 150, duration: '2.5 hours', description: `Historic center and architectural highlights of ${titleCaseName}.` },
-      { id: `act-view-${cleanName}`, name: `${titleCaseName} Valley / Scenic Panoramic Viewpoint`, category: 'Nature', isOutdoor: true, costPerPerson: 100, duration: '3 hours', description: `Picturesque scenic overview of the surrounding landscape.` },
-      { id: `act-museum-${cleanName}`, name: `${titleCaseName} Regional Cultural Arts Museum`, category: 'Culture', isOutdoor: false, costPerPerson: 120, duration: '2 hours', description: `Indoor sheltered exhibits detailing the traditions and history of ${titleCaseName}.` },
-      { id: `act-market-${cleanName}`, name: `Old Town Local Bazaar & Artisan Emporium`, category: 'Shopping', isOutdoor: false, costPerPerson: 200, duration: 'Evening', description: `Sheltered market arcades offering regional handicrafts and souvenirs.` },
-      { id: `act-adventure-${cleanName}`, name: `Regional Countryside Trek & Nature Trail`, category: 'Adventure', isOutdoor: true, costPerPerson: 350, duration: 'Half Day', description: `Outdoor trail exploring the natural flora and topography.` }
+      {
+        id: `act-high-${key}`,
+        name: `${titleCaseName} Central Landmark & Heritage Walk`,
+        category: 'Culture',
+        isOutdoor: true,
+        costPerPerson: 150,
+        duration: '2.5 hours',
+        description: `Historic center and architectural highlights of ${titleCaseName}.`
+      },
+      {
+        id: `act-view-${key}`,
+        name: `${titleCaseName} Scenic Panoramic Viewpoint`,
+        category: 'Nature',
+        isOutdoor: true,
+        costPerPerson: 100,
+        duration: '3 hours',
+        description: `Picturesque scenic overview of the surrounding landscape.`
+      },
+      {
+        id: `act-museum-${key}`,
+        name: `${titleCaseName} Regional Cultural Arts Museum`,
+        category: 'Culture',
+        isOutdoor: false,
+        costPerPerson: 120,
+        duration: '2 hours',
+        description: `Indoor sheltered exhibits detailing the traditions and history of ${titleCaseName}.`
+      },
+      {
+        id: `act-market-${key}`,
+        name: `${titleCaseName} Old Town Local Bazaar & Artisan Market`,
+        category: 'Shopping',
+        isOutdoor: false,
+        costPerPerson: 200,
+        duration: 'Evening',
+        description: `Sheltered market arcades offering regional handicrafts and souvenirs.`
+      },
+      {
+        id: `act-adventure-${key}`,
+        name: `${titleCaseName} Countryside Nature Trail & Trek`,
+        category: 'Adventure',
+        isOutdoor: true,
+        costPerPerson: 350,
+        duration: 'Half Day',
+        description: `Outdoor trail exploring the natural flora and topography.`
+      }
     ],
     restaurants: [
-      { name: `Traditional Flavors of ${titleCaseName}`, cuisine: 'Regional Speciality', avgCostPerPerson: 400, note: `Popular authentic hometown dishes` },
-      { name: `The Garden Terrace ${titleCaseName}`, cuisine: 'Multi-Cuisine & Cafe', avgCostPerPerson: 650, note: `Comfortable indoor dining with local staples` },
-      { name: `Heritage Royal Kitchen`, cuisine: 'Fine Regional Dining', avgCostPerPerson: 900, note: `Traditional delicacies and desserts` }
+      {
+        name: `Traditional Flavors of ${titleCaseName}`,
+        cuisine: 'Regional Speciality',
+        avgCostPerPerson: 400,
+        note: `Popular authentic hometown dishes`
+      },
+      {
+        name: `The Garden Terrace ${titleCaseName}`,
+        cuisine: 'Multi-Cuisine & Cafe',
+        avgCostPerPerson: 650,
+        note: `Comfortable indoor dining with local staples`
+      },
+      {
+        name: `Heritage Royal Kitchen`,
+        cuisine: 'Fine Regional Dining',
+        avgCostPerPerson: 900,
+        note: `Traditional delicacies and desserts`
+      }
     ]
   };
 }

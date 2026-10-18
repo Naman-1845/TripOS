@@ -9,7 +9,14 @@
  * - 'local-offline-fallback': Server unreachable, client-side heuristic engine used
  */
 
-import { generateRecoveryProposal, calculateTripDeltas, validateRecoveryProposal } from './recoveryEngine.js';
+import {
+  generateRecoveryProposal,
+  generateCandidateProposals,
+  calculateTripDeltas,
+  validateRecoveryProposal
+} from './recoveryEngine.js';
+import { parseIntentDeterministic } from './intentParser.js';
+import { getDestinationData, registerCustomCatalog, getCachedCatalog } from '../data/destinationsData.js';
 
 const getBaseUrl = () => {
   if (typeof import.meta !== 'undefined' && import.meta.env?.VITE_AGENT_API_URL) {
@@ -62,9 +69,80 @@ export async function getAgentStatus() {
 }
 
 /**
+ * Parses natural language trip commands into structured intent changes.
+ * Calls backend endpoint /api/agent/parse-intent with honest client-side offline fallback.
+ */
+export async function parseTripIntent({
+  text,
+  activeTrip,
+  forceFallback = false
+}) {
+  if (!text || typeof text !== 'string') {
+    throw new Error('parseTripIntent requires a non-empty text string.');
+  }
+
+  if (!activeTrip || !activeTrip.inputs || !activeTrip.id) {
+    throw new Error('parseTripIntent requires an active trip baseline.');
+  }
+
+  const baseUrl = getBaseUrl();
+  let timeoutId;
+
+  try {
+    const controller = new AbortController();
+    timeoutId = setTimeout(() => controller.abort(), 8000);
+
+    const res = await fetch(`${baseUrl}/api/agent/parse-intent`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        text,
+        activeTrip,
+        forceFallback
+      }),
+      signal: controller.signal
+    });
+    clearTimeout(timeoutId);
+
+    if (!res.ok) {
+      const errorBody = await res.json().catch(() => ({}));
+      throw new Error(errorBody.error || `Server responded with HTTP ${res.status}`);
+    }
+
+    const data = await res.json();
+    if (!data.success || !data.intent) {
+      throw new Error(data.error || 'Server did not return a valid intent.');
+    }
+
+    return {
+      success: true,
+      intent: data.intent,
+      mode: data.mode,
+      provider: data.provider,
+      isOfflineFallback: false
+    };
+  } catch (err) {
+    console.warn('[TripOS Agent Client] Backend parse-intent failed or offline. Activating local deterministic intent parser fallback:', err.message);
+
+    const intent = parseIntentDeterministic(text, activeTrip);
+    return {
+      success: true,
+      intent,
+      mode: 'local-offline-fallback',
+      provider: 'TripOS Client Heuristic Engine (Offline)',
+      isOfflineFallback: true
+    };
+  } finally {
+    if (timeoutId) clearTimeout(timeoutId);
+  }
+}
+
+/**
  * Requests autonomous recovery from the agent server.
- * If server is offline or errors, seamlessly falls back to local deterministic recovery engine
- * and labels the mode honestly.
+ * Returns recommended proposal and candidate strategies with trade-offs.
+ * If server is offline or errors, seamlessly falls back to local deterministic recovery engine.
  */
 export async function requestTripRecovery({
   activeTrip,
@@ -124,9 +202,31 @@ export async function requestTripRecovery({
       agentSummary: data.agentSummary || data.proposal.agentExplanation
     };
 
+    // Format candidates with metadata
+    const candidates = Array.isArray(data.candidates) && data.candidates.length > 0
+      ? data.candidates.map(c => ({
+          ...c,
+          proposal: {
+            ...c.proposal,
+            executionMode: data.mode,
+            provider: data.provider,
+            model: data.model,
+            trace: data.trace || [],
+            agentSummary: c.proposal.agentSummary || c.proposal.agentExplanation
+          }
+        }))
+      : [{
+          strategy: proposal.strategy || 'Recommended Plan',
+          proposal,
+          tradeoffs: proposal.tradeoffs || [],
+          costDifference: proposal.costImpact?.costDifference ?? 0,
+          recommended: true
+        }];
+
     return {
       success: true,
       proposal,
+      candidates,
       mode: data.mode,
       provider: data.provider,
       model: data.model,
@@ -171,7 +271,7 @@ export async function requestTripRecovery({
       ? simulatedDisruption
       : (requestedChanges.simulatedDisruption || activeTrip.simulatedDisruption || null);
 
-    const localProposal = generateRecoveryProposal(activeTrip, {
+    const offlineRun = generateCandidateProposals(activeTrip, {
       destination: targetDestination,
       origin: targetOrigin,
       travellers: targetTravellers,
@@ -183,25 +283,101 @@ export async function requestTripRecovery({
       ...(requestedChanges.accommodationPreference ? { accommodationPreference: requestedChanges.accommodationPreference } : {})
     });
 
+    const fallbackNotice = err.message?.includes('malformed')
+      ? 'Backend proposal malformed: proposal generated via client-side deterministic recovery engine.'
+      : 'Backend unreachable: proposal generated via client-side deterministic recovery engine.';
+
     const proposal = {
-      ...localProposal,
+      ...offlineRun.proposal,
       executionMode: 'local-offline-fallback',
       provider: 'TripOS Client Heuristic Engine (Offline)',
       model: null,
       trace: [],
-      agentSummary: err.message?.includes('malformed')
-        ? 'Backend proposal malformed: proposal generated via client-side deterministic recovery engine.'
-        : 'Backend unreachable: proposal generated via client-side deterministic recovery engine.'
+      agentSummary: fallbackNotice
     };
+
+    const candidates = offlineRun.candidates.map(c => ({
+      ...c,
+      proposal: {
+        ...c.proposal,
+        executionMode: 'local-offline-fallback',
+        provider: 'TripOS Client Heuristic Engine (Offline)',
+        model: null,
+        trace: [],
+        agentSummary: fallbackNotice
+      }
+    }));
 
     return {
       success: true,
       proposal,
+      candidates,
       mode: 'local-offline-fallback',
       provider: 'TripOS Client Heuristic Engine (Offline)',
       model: null,
       trace: [],
       agentSummary: proposal.agentSummary,
+      isOfflineFallback: true
+    };
+  } finally {
+    if (timeoutId) clearTimeout(timeoutId);
+  }
+}
+
+/**
+ * Fetches destination catalog for a specific origin -> destination route.
+ * Calls backend POST /api/agent/generate-catalog with client-side fallback.
+ */
+export async function fetchCatalogForRoute({ origin, destination }) {
+  if (!destination) {
+    throw new Error('fetchCatalogForRoute requires a valid destination.');
+  }
+
+  const cleanDest = destination.trim();
+  const cleanOrigin = (origin || '').trim() || 'Nearest Transit Hub';
+
+  // 1. Check local cache first
+  const cached = getCachedCatalog(cleanOrigin, cleanDest);
+  if (cached) {
+    return {
+      success: true,
+      mode: cached.source === 'gemini-ai' ? 'live-llm-agent' : 'deterministic-fallback',
+      catalog: cached
+    };
+  }
+
+  const baseUrl = getBaseUrl();
+  let timeoutId;
+
+  try {
+    const controller = new AbortController();
+    timeoutId = setTimeout(() => controller.abort(), 8000);
+
+    const res = await fetch(`${baseUrl}/api/agent/generate-catalog`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ origin: cleanOrigin, destination: cleanDest }),
+      signal: controller.signal
+    });
+
+    if (!res.ok) {
+      throw new Error(`Catalog server returned HTTP ${res.status}`);
+    }
+
+    const data = await res.json();
+    if (data.success && data.catalog) {
+      registerCustomCatalog(cleanOrigin, cleanDest, data.catalog);
+      return data;
+    }
+    throw new Error(data.error || 'Invalid catalog response');
+  } catch (err) {
+    console.warn('[TripOS Agent Client] Catalog API failed or offline. Using local rule-based catalog:', err.message);
+    const fallbackCatalog = getDestinationData(cleanDest, cleanOrigin);
+    registerCustomCatalog(cleanOrigin, cleanDest, fallbackCatalog);
+    return {
+      success: true,
+      mode: 'local-offline-fallback',
+      catalog: fallbackCatalog,
       isOfflineFallback: true
     };
   } finally {

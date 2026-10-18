@@ -227,10 +227,15 @@ export function generateRecoveryProposal(activeTrip, proposedChanges = {}) {
     ? `Recovery evaluated candidate adjustments for ${next.destination}. Total verified expenses are ₹${proposedBudgetBreakdown.totalEstimatedExpenses.toLocaleString('en-IN')}, exceeding the target ₹${next.budget.toLocaleString('en-IN')} budget by ₹${proposedBudgetBreakdown.deficit.toLocaleString('en-IN')}. Consider reducing duration to fit within budget.`
     : `Recovery evaluated candidate adjustments for ${next.destination}. Total verified cost is ₹${proposedBudgetBreakdown.totalEstimatedExpenses.toLocaleString('en-IN')} against ₹${next.budget.toLocaleString('en-IN')} budget.`;
 
+  const strategy = proposedChanges.strategy || 'Balanced Recovery';
+  const tradeoffs = Array.isArray(proposedChanges.tradeoffs) ? proposedChanges.tradeoffs : [];
+
   return {
     proposalId: `prop_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
     createdAt: new Date().toISOString(),
     status: 'pending', // 'pending' | 'approved' | 'rejected' | 'stale'
+    strategy,
+    tradeoffs,
     userReason: proposedChanges.userReason ? String(proposedChanges.userReason).trim() : null,
     agentExplanation,
     agentSummary: agentExplanation,
@@ -265,6 +270,102 @@ export function generateRecoveryProposal(activeTrip, proposedChanges = {}) {
       itinerary: proposedItinerary,
       simulatedDisruption: next.simulatedDisruption
     }
+  };
+}
+
+/**
+ * Generates 2-3 candidate recovery strategies deterministically:
+ * 1. "Budget Saver": cheapest transport + hostel/standard stay
+ * 2. "Time Saver / Fastest": fastest transit option (flight/cab)
+ * 3. "Comfort/Indoor-Safe": higher comfort tier, sheltered activities if weather disrupted
+ * Deduplicates identical plans and selects a recommended plan.
+ */
+export function generateCandidateProposals(activeTrip, proposedChanges = {}) {
+  const dest = (proposedChanges.destination && String(proposedChanges.destination).trim()) || activeTrip.inputs.destination;
+  const destData = getDestinationData(dest);
+  const isDisrupted = Boolean((proposedChanges.simulatedDisruption || activeTrip.simulatedDisruption)?.outdoorUnsuitable);
+
+  // 1. Budget Saver
+  const budgetSaver = generateRecoveryProposal(activeTrip, {
+    ...proposedChanges,
+    transportPreference: 'Bus',
+    accommodationPreference: 'Hostel',
+    strategy: 'Budget Saver',
+    tradeoffs: [
+      'Maximum financial savings with economy transport',
+      'Shared or budget lodging',
+      'Longer transit duration'
+    ]
+  });
+
+  // 2. Time Saver / Fastest
+  const fastestTransport = destData?.transportOptions?.find(t => t.type === 'Flight') ? 'Flight' : 'Cab';
+  const timeSaver = generateRecoveryProposal(activeTrip, {
+    ...proposedChanges,
+    transportPreference: fastestTransport,
+    accommodationPreference: 'Standard',
+    strategy: 'Time Saver / Fastest',
+    tradeoffs: [
+      `Fastest transit via ${fastestTransport}`,
+      'More time available at destination',
+      'Higher transit cost impact'
+    ]
+  });
+
+  // 3. Comfort / Indoor-Safe
+  const comfortLodging = destData?.accommodations?.find(a => a.type === 'Luxury') ? 'Luxury' : 'Standard';
+  const comfortPlan = generateRecoveryProposal(activeTrip, {
+    ...proposedChanges,
+    transportPreference: 'Cab',
+    accommodationPreference: comfortLodging,
+    strategy: 'Comfort/Indoor-Safe',
+    tradeoffs: [
+      isDisrupted ? 'Pre-emptively rerouted to sheltered indoor attractions' : `Comfort stay at ${comfortLodging} lodging`,
+      'Dedicated private transport',
+      'Higher budget utilization'
+    ]
+  });
+
+  const all = [budgetSaver, timeSaver, comfortPlan];
+  const unique = [];
+  const seenKeys = new Set();
+
+  for (const p of all) {
+    const key = `${p.proposedPlan.selectedTransport?.id}_${p.proposedPlan.selectedAccommodation?.id}_${p.proposedPlan.inputs.duration}_${p.proposedPlan.inputs.budget}`;
+    if (!seenKeys.has(key)) {
+      seenKeys.add(key);
+      unique.push(p);
+    }
+  }
+
+  if (unique.length === 0) {
+    unique.push(budgetSaver);
+  }
+
+  // Determine recommendation:
+  let recommended = unique[0];
+  if (isDisrupted) {
+    recommended = unique.find(p => p.strategy === 'Comfort/Indoor-Safe') || unique[0];
+  } else if (
+    (proposedChanges.budgetDelta !== undefined && proposedChanges.budgetDelta < 0) ||
+    (proposedChanges.budget !== undefined && proposedChanges.budget < activeTrip.inputs.budget)
+  ) {
+    recommended = unique.find(p => p.strategy === 'Budget Saver') || unique[0];
+  } else {
+    recommended = unique.find(p => p.strategy === 'Time Saver / Fastest') || unique[0];
+  }
+
+  const candidates = unique.map(p => ({
+    strategy: p.strategy,
+    proposal: p,
+    tradeoffs: p.tradeoffs || [],
+    costDifference: p.costImpact.costDifference,
+    recommended: p.proposalId === recommended.proposalId
+  }));
+
+  return {
+    proposal: recommended,
+    candidates
   };
 }
 
@@ -392,6 +493,14 @@ export function validateRecoveryProposal(proposal, activeTrip = null, currentFor
 
   if (proposal.status !== 'pending') {
     errors.push(`Proposal status is "${proposal.status}". Only pending proposals can be approved or evaluated.`);
+  }
+
+  if (proposal.strategy !== undefined && typeof proposal.strategy !== 'string') {
+    errors.push('Proposal strategy must be a string.');
+  }
+
+  if (proposal.tradeoffs !== undefined && !Array.isArray(proposal.tradeoffs)) {
+    errors.push('Proposal tradeoffs must be an array of strings.');
   }
 
   const proposedPlan = proposal.proposedPlan;
